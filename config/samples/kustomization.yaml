@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- sv_v1alpha1_sharedvolume.yaml
+- sv_v1alpha1_clustersharedvolume.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
