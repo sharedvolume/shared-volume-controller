@@ -11,10 +11,37 @@ spec:
     kind: SharedVolume
     listKind: SharedVolumeList
     plural: sharedvolumes
+    shortNames:
+    - sv
     singular: sharedvolume
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - description: SharedVolume Ready
+      jsonPath: .status.ready
+      name: Ready
+      type: boolean
+    - description: Current Phase
+      jsonPath: .status.phase
+      name: Phase
+      type: string
+    - description: NFS Server Address
+      jsonPath: .status.nfsServerAddress
+      name: NFS Address
+      type: string
+    - description: Mount Path
+      jsonPath: .spec.mountPath
+      name: Mount Path
+      type: string
+    - description: Sync Interval
+      jsonPath: .spec.syncInterval
+      name: SyncInterval
+      type: string
+    - description: Storage Capacity
+      jsonPath: .spec.storage.capacity
+      name: Capacity
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: SharedVolume is the Schema for the sharedvolumes API.
@@ -39,13 +66,103 @@ spec:
           spec:
             description: SharedVolumeSpec defines the desired state of SharedVolume.
             properties:
-              foo:
-                description: Foo is an example field of SharedVolume. Edit sharedvolume_types.go
-                  to remove/update
+              mountPath:
                 type: string
+              nfsServer:
+                description: NfsServerSpec defines the NFS server configuration.
+                properties:
+                  image:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  path:
+                    type: string
+                  url:
+                    type: string
+                type: object
+              referenceValue:
+                type: string
+              resourceNamespace:
+                type: string
+              source:
+                description: VolumeSourceSpec defines the source for the shared volume.
+                properties:
+                  ssh:
+                    description: SSHSourceSpec defines SSH source configuration.
+                    properties:
+                      host:
+                        type: string
+                      path:
+                        type: string
+                      port:
+                        type: integer
+                      privateKey:
+                        type: string
+                      privateKeyFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      username:
+                        type: string
+                    required:
+                    - host
+                    type: object
+                type: object
+              storage:
+                description: StorageSpec defines storage configuration.
+                properties:
+                  accessMode:
+                    type: string
+                  capacity:
+                    type: string
+                required:
+                - capacity
+                type: object
+              storageClassName:
+                type: string
+              syncInterval:
+                type: string
+            required:
+            - mountPath
             type: object
           status:
             description: SharedVolumeStatus defines the observed state of SharedVolume.
+            properties:
+              message:
+                description: Message provides additional information about the current
+                  phase
+                type: string
+              nfsServerAddress:
+                description: NfsServerAddress is the address where the NFS server
+                  can be accessed
+                type: string
+              persistentVolumeClaimName:
+                description: PersistentVolumeClaimName is the name of the associated
+                  PVC
+                type: string
+              persistentVolumeName:
+                description: PersistentVolumeName is the name of the associated PV
+                type: string
+              phase:
+                description: Phase indicates the current phase of the SharedVolume
+                type: string
+              ready:
+                description: Ready indicates whether the SharedVolume is ready for
+                  use
+                type: boolean
+              serviceName:
+                description: ServiceName is the name of the associated Service
+                type: string
+            required:
+            - ready
             type: object
         type: object
     served: true

@@ -40,10 +40,72 @@ spec:
           spec:
             description: ClusterSharedVolumeSpec defines the desired state of ClusterSharedVolume.
             properties:
-              foo:
-                description: Foo is an example field of ClusterSharedVolume. Edit
-                  clustersharedvolume_types.go to remove/update
+              mountPath:
                 type: string
+              nfsServer:
+                description: NfsServerSpec defines the NFS server configuration.
+                properties:
+                  image:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  path:
+                    type: string
+                  url:
+                    type: string
+                type: object
+              referenceValue:
+                type: string
+              resourceNamespace:
+                type: string
+              source:
+                description: VolumeSourceSpec defines the source for the shared volume.
+                properties:
+                  ssh:
+                    description: SSHSourceSpec defines SSH source configuration.
+                    properties:
+                      host:
+                        type: string
+                      path:
+                        type: string
+                      port:
+                        type: integer
+                      privateKey:
+                        type: string
+                      privateKeyFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      username:
+                        type: string
+                    required:
+                    - host
+                    type: object
+                type: object
+              storage:
+                description: StorageSpec defines storage configuration.
+                properties:
+                  accessMode:
+                    type: string
+                  capacity:
+                    type: string
+                required:
+                - capacity
+                type: object
+              storageClassName:
+                type: string
+              syncInterval:
+                type: string
+            required:
+            - mountPath
             type: object
           status:
             description: ClusterSharedVolumeStatus defines the observed state of ClusterSharedVolume.

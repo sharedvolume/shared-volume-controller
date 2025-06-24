@@ -30,12 +30,31 @@ type SharedVolumeSpec struct {
 
 // SharedVolumeStatus defines the observed state of SharedVolume.
 type SharedVolumeStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Ready indicates whether the SharedVolume is ready for use
+	Ready bool `json:"ready"`
+	// Phase indicates the current phase of the SharedVolume
+	Phase string `json:"phase,omitempty"`
+	// Message provides additional information about the current phase
+	Message string `json:"message,omitempty"`
+	// NfsServerAddress is the address where the NFS server can be accessed
+	NfsServerAddress string `json:"nfsServerAddress,omitempty"`
+	// PersistentVolumeClaimName is the name of the associated PVC
+	PersistentVolumeClaimName string `json:"persistentVolumeClaimName,omitempty"`
+	// PersistentVolumeName is the name of the associated PV
+	PersistentVolumeName string `json:"persistentVolumeName,omitempty"`
+	// ServiceName is the name of the associated Service
+	ServiceName string `json:"serviceName,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=sv,scope=Namespaced
+// +kubebuilder:printcolumn:name="Ready",type=boolean,JSONPath=".status.ready",description="SharedVolume Ready"
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase",description="Current Phase"
+// +kubebuilder:printcolumn:name="NFS Address",type=string,JSONPath=".status.nfsServerAddress",description="NFS Server Address"
+// +kubebuilder:printcolumn:name="Mount Path",type=string,JSONPath=".spec.mountPath",description="Mount Path"
+// +kubebuilder:printcolumn:name="SyncInterval",type=string,JSONPath=".spec.syncInterval",description="Sync Interval"
+// +kubebuilder:printcolumn:name="Capacity",type=string,JSONPath=".spec.storage.capacity",description="Storage Capacity"
 
 // SharedVolume is the Schema for the sharedvolumes API.
 type SharedVolume struct {

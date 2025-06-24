@@ -37,8 +37,12 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	nfsv1alpha1 "github.com/sharedvolume/nfs-server-controller/api/v1alpha1"
+
 	svv1alpha1 "github.com/sharedvolume/shared-volume-controller/api/v1alpha1"
 	"github.com/sharedvolume/shared-volume-controller/internal/controller"
+	webhookv1 "github.com/sharedvolume/shared-volume-controller/internal/webhook/v1"
+	webhookv1alpha1 "github.com/sharedvolume/shared-volume-controller/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -51,6 +55,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(svv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(nfsv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -63,6 +68,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var controllerNamespace string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -81,6 +87,8 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&controllerNamespace, "controller-namespace", "shared-volume-controller",
+		"The namespace where controller resources will be created")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -205,16 +213,30 @@ func main() {
 	if err := (&controller.SharedVolumeReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	}).SetupWithManager(mgr, controllerNamespace); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SharedVolume")
 		os.Exit(1)
 	}
 	if err := (&controller.ClusterSharedVolumeReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	}).SetupWithManager(mgr, controllerNamespace); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ClusterSharedVolume")
 		os.Exit(1)
+	}
+	// nolint:goconst
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		if err := webhookv1alpha1.SetupSharedVolumeWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "SharedVolume")
+			os.Exit(1)
+		}
+	}
+	// nolint:goconst
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		if err := webhookv1.SetupCronJobWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "CronJob")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 

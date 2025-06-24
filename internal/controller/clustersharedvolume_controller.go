@@ -31,11 +31,14 @@ import (
 type ClusterSharedVolumeReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// ControllerNamespace is the namespace where controller resources will be created
+	ControllerNamespace string
 }
 
 // +kubebuilder:rbac:groups=sv.sharedvolume.io,resources=clustersharedvolumes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sv.sharedvolume.io,resources=clustersharedvolumes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=sv.sharedvolume.io,resources=clustersharedvolumes/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -55,7 +58,17 @@ func (r *ClusterSharedVolumeReconciler) Reconcile(ctx context.Context, req ctrl.
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *ClusterSharedVolumeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *ClusterSharedVolumeReconciler) SetupWithManager(mgr ctrl.Manager, controllerNamespace string) error {
+	// Set the controller namespace
+	r.ControllerNamespace = controllerNamespace
+	if r.ControllerNamespace == "" {
+		// Default to "shared-volume-controller" if not specified
+		r.ControllerNamespace = "shared-volume-controller"
+	}
+
+	// Note: We don't create the namespace here because the cache isn't started yet.
+	// The namespace will be created during the first reconciliation if needed.
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&svv1alpha1.ClusterSharedVolume{}).
 		Named("clustersharedvolume").

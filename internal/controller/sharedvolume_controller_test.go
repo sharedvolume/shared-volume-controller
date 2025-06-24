@@ -81,4 +81,65 @@ var _ = Describe("SharedVolume Controller", func() {
 			// Example: If you expect a certain status condition after reconciliation, verify it here.
 		})
 	})
+
+	Context("When handling NfsServer Path field", func() {
+		It("should default NfsServer Path to '/' when not provided", func() {
+			// Create a SharedVolume with NfsServer that doesn't have Path field
+			sharedVolume := &svv1alpha1.SharedVolume{
+				Spec: svv1alpha1.SharedVolumeSpec{
+					VolumeSpecBase: svv1alpha1.VolumeSpecBase{
+						MountPath: "/data",
+						Storage: &svv1alpha1.StorageSpec{
+							Capacity:   "1Gi",
+							AccessMode: "ReadWrite",
+						},
+						NfsServer: &svv1alpha1.NfsServerSpec{
+							Name:      "test-nfs",
+							Namespace: "default",
+							URL:       "test-nfs.default.svc.cluster.local",
+							// Path is intentionally not set
+						},
+					},
+				},
+			}
+
+			// Call fillAndValidateSpec and validate results
+			generateNfsServer := false // We're already providing NfsServer
+			err := fillAndValidateSpec(sharedVolume, generateNfsServer)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify Path is defaulted to "/"
+			Expect(sharedVolume.Spec.NfsServer.Path).To(Equal("/"))
+		})
+
+		It("should preserve existing NfsServer Path when provided", func() {
+			// Create a SharedVolume with NfsServer that has a custom Path
+			customPath := "/exports"
+			sharedVolume := &svv1alpha1.SharedVolume{
+				Spec: svv1alpha1.SharedVolumeSpec{
+					VolumeSpecBase: svv1alpha1.VolumeSpecBase{
+						MountPath: "/data",
+						Storage: &svv1alpha1.StorageSpec{
+							Capacity:   "1Gi",
+							AccessMode: "ReadWrite",
+						},
+						NfsServer: &svv1alpha1.NfsServerSpec{
+							Name:      "test-nfs",
+							Namespace: "default",
+							URL:       "test-nfs.default.svc.cluster.local",
+							Path:      customPath,
+						},
+					},
+				},
+			}
+
+			// Call fillAndValidateSpec and validate results
+			generateNfsServer := false // We're already providing NfsServer
+			err := fillAndValidateSpec(sharedVolume, generateNfsServer)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify Path is preserved
+			Expect(sharedVolume.Spec.NfsServer.Path).To(Equal(customPath))
+		})
+	})
 })
