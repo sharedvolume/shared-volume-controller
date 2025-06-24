@@ -5,13 +5,14 @@ metadata:
 spec:
   resourceNamespace: shared-volume-operator # Default is shared-volume-operator, this is the namespace where the operator is running
   nfsServer:
-    type: object # This could be 'object' or 'external'
     name: nfs-server
     namespace: default
+    image: sharedvolume/nfs-server:3.22.0 # this is optional, default is sharedvolume/nfs-server:3.22.0
     url: nfs-server.default.svc.cluster.local # if type is 'object' url is required
+    path: "/"
+  storageClassName: nfs-client # This is required if type is 'object' and name and namespace are not provided
   mountPath: /mnt/shared 
   syncInterval: 60s # Interval to sync the shared volume, default is 60 seconds
-  storageClassName: nfs-client # This is required if type is 'object' and name and namespace are not provided
   storage: # This is optional, if not provided the default capacity will be used
     capacity: 10Gi # This is the storage capacity, this is required
     accessMode: ReadWrite # This is the access mode, default is ReadOnly, could be ReadWrite or ReadOnly

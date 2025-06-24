@@ -1,0 +1,31 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: sharedvolume-replicas
+  namespace: default
+spec:
+  mountPath: /mnt/shared
+  syncInterval: 30s
+  storageClassName: standard
+  storage:
+    capacity: 5Gi
+    accessMode: ReadWrite
+  source:
+    ssh:
+      host: data.example.com
+      username: datauser
+      path: /data/shared
+      privateKeyFromSecret:
+        name: ssh-data-secret
+        key: id_rsa
+  # The controller will automatically:
+  # 1. Generate a referenceValue (e.g., sv-xyz123)
+  # 2. Create an NfsServer with name nfs-sv-xyz123 (using mount path "/export" internally)
+  # 3. Create a PV with name pv-sv-xyz123 (using share "/export" to match the NfsServer)
+  # 4. Create a PVC with name sv-xyz123
+  # 5. Create a ReplicaSet with name sv-xyz123
+  # 6. Create a Service with name sv-xyz123-svc
+  #
+  # Note: While the SharedVolume's spec.NfsServer.Path is set to "/", the actual NfsServer
+  # created will use "/export" because using "/" as a mount destination causes the error:
+  # "destination can't be '/'". The PV is configured to match this path.

@@ -2,19 +2,17 @@ apiVersion: sv.sharedvolume.io/v1alpha1
 kind: SharedVolume
 metadata:
   name: sharedvolume-sample
-  namespace: default
 spec:
   mountPath: /mnt/shared 
-  storageClassName: nfs-client # This is required if type is 'object' and name and namespace are not provided
+  syncInterval: 60s # Interval to sync the shared volume, default is 60 seconds
+  storageClassName: standard # This is required if type is 'object' and name and namespace are not provided
+  storage: # This is optional, if not provided the default capacity will be used
+    capacity: 10Gi # This is the storage capacity, this is required
   source:
     ssh:
       host: ssh.example.com
       port: 22 # optional, default is 22
       username: user # optional, default is 'root'
-      privateKey: | # This is the private key content this is opetional
-        -----BEGIN OPENSSH PRIVATE KEY-----
-        <PRIVATE_KEY_CONTENT>
-        -----END OPENSSH PRIVATE KEY-----
       path: /path/to/shared/volume # This is the path to the shared volume on the SSH server default is '/nfs'
       privateKeyFromSecret: # This is optional, if provided the privateKey field will be ignored
         name: ssh-secret
