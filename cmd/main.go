@@ -211,8 +211,7 @@ func main() {
 	}
 
 	if err := (&controller.SharedVolumeReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		VolumeControllerBase: controller.NewVolumeControllerBase(mgr.GetClient(), mgr.GetScheme(), controllerNamespace, nil),
 	}).SetupWithManager(mgr, controllerNamespace); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SharedVolume")
 		os.Exit(1)

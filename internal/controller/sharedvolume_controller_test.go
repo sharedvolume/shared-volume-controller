@@ -81,9 +81,7 @@ var _ = Describe("SharedVolume Controller", func() {
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &SharedVolumeReconciler{
-				Client:              k8sClient,
-				Scheme:              k8sClient.Scheme(),
-				ControllerNamespace: "shared-volume-controller",
+				VolumeControllerBase: NewVolumeControllerBase(k8sClient, k8sClient.Scheme(), "shared-volume-controller", nil),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -116,9 +114,10 @@ var _ = Describe("SharedVolume Controller", func() {
 				},
 			}
 
-			// Call fillAndValidateSpec and validate results
+			// Call FillAndValidateSpec and validate results
 			generateNfsServer := false // We're already providing NfsServer
-			err := fillAndValidateSpec(sharedVolume, generateNfsServer)
+			base := NewVolumeControllerBase(k8sClient, k8sClient.Scheme(), "shared-volume-controller", nil)
+			err := base.FillAndValidateSpec(sharedVolume, generateNfsServer)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify Path is defaulted to "/"
@@ -146,9 +145,10 @@ var _ = Describe("SharedVolume Controller", func() {
 				},
 			}
 
-			// Call fillAndValidateSpec and validate results
+			// Call FillAndValidateSpec and validate results
 			generateNfsServer := false // We're already providing NfsServer
-			err := fillAndValidateSpec(sharedVolume, generateNfsServer)
+			base := NewVolumeControllerBase(k8sClient, k8sClient.Scheme(), "shared-volume-controller", nil)
+			err := base.FillAndValidateSpec(sharedVolume, generateNfsServer)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify Path is preserved

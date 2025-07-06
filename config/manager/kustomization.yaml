@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: docker.io/sharedvolume/shared-volume-controller
-  newTag: test-0.0.73
+  newTag: test-0.0.74
