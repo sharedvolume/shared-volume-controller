@@ -51,7 +51,19 @@ var _ = Describe("SharedVolume Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: svv1alpha1.SharedVolumeSpec{
+						VolumeSpecBase: svv1alpha1.VolumeSpecBase{
+							MountPath: "/mnt/shared",
+							Storage: &svv1alpha1.StorageSpec{
+								Capacity:   "1Gi",
+								AccessMode: "ReadWrite",
+							},
+							NfsServer: &svv1alpha1.NfsServerSpec{
+								Image: "nfs-server:latest",
+								Path:  "/exports",
+							},
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
@@ -69,8 +81,9 @@ var _ = Describe("SharedVolume Controller", func() {
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &SharedVolumeReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+				Client:              k8sClient,
+				Scheme:              k8sClient.Scheme(),
+				ControllerNamespace: "shared-volume-controller",
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{

@@ -1,0 +1,11 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: test-status-phase
+  namespace: default
+spec:
+  mountPath: "/data"
+  storage:
+    capacity: "1Gi"
+    accessMode: "ReadWrite"
+  storageClassName: "nfs-csi"

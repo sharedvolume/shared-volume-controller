@@ -217,11 +217,12 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "SharedVolume")
 		os.Exit(1)
 	}
-	if err := (&controller.ClusterSharedVolumeReconciler{
+
+	if err := (&controller.PodCleanupReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr, controllerNamespace); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "ClusterSharedVolume")
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "PodCleanup")
 		os.Exit(1)
 	}
 	// nolint:goconst

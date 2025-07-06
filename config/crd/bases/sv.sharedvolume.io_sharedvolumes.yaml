@@ -17,10 +17,6 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - description: SharedVolume Ready
-      jsonPath: .status.ready
-      name: Ready
-      type: boolean
     - description: Current Phase
       jsonPath: .status.phase
       name: Phase
@@ -130,6 +126,8 @@ spec:
                 type: string
               syncInterval:
                 type: string
+              syncTimeout:
+                type: string
             required:
             - mountPath
             type: object
@@ -153,16 +151,11 @@ spec:
                 type: string
               phase:
                 description: Phase indicates the current phase of the SharedVolume
+                  (Pending, Preparing, Ready)
                 type: string
-              ready:
-                description: Ready indicates whether the SharedVolume is ready for
-                  use
-                type: boolean
               serviceName:
                 description: ServiceName is the name of the associated Service
                 type: string
-            required:
-            - ready
             type: object
         type: object
     served: true

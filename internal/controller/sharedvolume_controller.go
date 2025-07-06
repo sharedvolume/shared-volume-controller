@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -29,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -46,6 +48,8 @@ type SharedVolumeReconciler struct {
 	Scheme *runtime.Scheme
 	// ControllerNamespace is the namespace where controller resources will be created
 	ControllerNamespace string
+	// SyncController handles sync operations
+	SyncController *SyncController
 }
 
 // +kubebuilder:rbac:groups=sv.sharedvolume.io,resources=sharedvolumes,verbs=get;list;watch;create;update;patch;delete
@@ -55,11 +59,15 @@ type SharedVolumeReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=persistentvolumes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=persistentvolumes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create
-// +kubebuilder:rbac:groups=nfs.sharedvolume.io,resources=nfsservers,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=sharedvolume.io,resources=nfsservers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods/finalizers,verbs=update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -108,9 +116,8 @@ func (r *SharedVolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				return ctrl.Result{}, err
 			}
 
-			// Remove the finalizer to allow deletion
-			sharedVolume.Finalizers = removeString(sharedVolume.Finalizers, finalizerName)
-			if err := r.Update(ctx, &sharedVolume); err != nil {
+			// Remove the finalizer to allow deletion with retry logic
+			if err := r.removeFinalizerWithRetry(ctx, &sharedVolume, finalizerName); err != nil {
 				log.Error(err, "Failed to remove finalizer")
 				return ctrl.Result{}, err
 			}
@@ -151,6 +158,9 @@ func fillAndValidateSpec(sharedVolume *svv1alpha1.SharedVolume, generateNfsServe
 	}
 	if sharedVolume.Spec.SyncInterval == "" {
 		sharedVolume.Spec.SyncInterval = "60s"
+	}
+	if sharedVolume.Spec.SyncTimeout == "" {
+		sharedVolume.Spec.SyncTimeout = "120s"
 	}
 	if sharedVolume.Spec.Storage == nil {
 		return errors.New("storage is required in SharedVolume spec")
@@ -313,9 +323,12 @@ func (r *SharedVolumeReconciler) checkAndUpdateNfsServerStatus(ctx context.Conte
 
 	// Update status if changed
 	if statusChanged {
+		log.Info("NFS server status changed, updating SharedVolume status",
+			"ready", ready,
+			"phase", phase,
+			"message", message)
 		err := r.updateStatusWithRetry(ctx, sharedVolume, func(sv *svv1alpha1.SharedVolume) {
 			// Update the fields that we changed
-			sv.Status.Ready = sharedVolume.Status.Ready
 			sv.Status.Phase = sharedVolume.Status.Phase
 			sv.Status.Message = sharedVolume.Status.Message
 
@@ -329,6 +342,8 @@ func (r *SharedVolumeReconciler) checkAndUpdateNfsServerStatus(ctx context.Conte
 			log.Error(err, "Failed to update SharedVolume status")
 			return ctrl.Result{}, err
 		}
+	} else {
+		log.V(1).Info("NFS server status unchanged, skipping status update")
 	}
 
 	// If NFS server not ready yet, requeue
@@ -348,17 +363,23 @@ func (r *SharedVolumeReconciler) checkAndUpdateNfsServerStatus(ctx context.Conte
 		return ctrl.Result{}, err
 	}
 
-	// Requeue after 30 seconds to regularly check resource readiness
-	// This ensures that even if we miss events, we'll eventually detect when resources become ready
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	// Only requeue if the SharedVolume is not ready yet
+	// Once it's ready, we rely on watches to trigger reconciliation if something changes
+	if sharedVolume.Status.Phase != "Ready" {
+		log.Info("SharedVolume not ready, requeuing", "phase", sharedVolume.Status.Phase)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	log.Info("SharedVolume is ready, no more requeuing needed", "phase", sharedVolume.Status.Phase)
+	return ctrl.Result{}, nil
 }
 
 // updateSharedVolumeStatus updates the status fields and returns true if any field was changed
 func (r *SharedVolumeReconciler) updateSharedVolumeStatus(sharedVolume *svv1alpha1.SharedVolume, nfsReady bool, phase string, message string) bool {
 	statusChanged := false
 
-	// Update phase if changed
-	if sharedVolume.Status.Phase != phase {
+	// Update phase if changed and phase is not empty (empty phase means don't update)
+	if phase != "" && sharedVolume.Status.Phase != phase {
 		sharedVolume.Status.Phase = phase
 		statusChanged = true
 	}
@@ -409,10 +430,11 @@ func (r *SharedVolumeReconciler) checkNfsServerStatus(ctx context.Context, share
 		log.Info(message,
 			"name", sharedVolume.Spec.NfsServer.Name,
 			"status", nfsServer.Status.Phase)
-		return false, nfsServer.Status.Phase, message, nil
+		return false, "Pending", message, nil
 	}
 
-	return true, "Ready", "NfsServer is ready", nil
+	// NFS server is ready - don't set the phase here, let checkResourceReadiness determine the final status
+	return true, "", "NfsServer is ready", nil
 }
 
 // reconcileRequiredResources creates or updates the PV, PVC, ReplicaSet, and Service resources
@@ -653,15 +675,15 @@ func (r *SharedVolumeReconciler) reconcileReplicaSet(ctx context.Context, shared
 		// ReplicaSet already exists, check if it has the correct configuration
 		needsUpdate := false
 
-		// Check if container port is correct (should be 80)
+		// Check if container port is correct (should be 8080)
 		if len(existingRS.Spec.Template.Spec.Containers) > 0 &&
 			len(existingRS.Spec.Template.Spec.Containers[0].Ports) > 0 {
 			currentPort := existingRS.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort
-			if currentPort != 80 {
+			if currentPort != 8080 {
 				log.Info("ReplicaSet has incorrect port configuration, will recreate",
 					"name", replicaSetName,
 					"currentPort", currentPort,
-					"expectedPort", 80)
+					"expectedPort", 8080)
 				needsUpdate = true
 			}
 		}
@@ -717,13 +739,33 @@ func (r *SharedVolumeReconciler) reconcileReplicaSet(ctx context.Context, shared
 					},
 				},
 				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{
+							Name:  "setup-folders",
+							Image: "sharedvolume/volume-syncer:0.0.2",
+							Command: []string{
+								"sh",
+								"-c",
+								fmt.Sprintf("mkdir -p /nfs/%s-%s && echo 'sv-sample-file' > /nfs/%s-%s/.sv && echo 'Created folder /nfs/%s-%s with .sv file'",
+									sharedVolume.Name, sharedVolume.Namespace,
+									sharedVolume.Name, sharedVolume.Namespace,
+									sharedVolume.Name, sharedVolume.Namespace),
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "shared-volume",
+									MountPath: "/nfs",
+								},
+							},
+						},
+					},
 					Containers: []corev1.Container{
 						{
-							Name:  "nginx",
-							Image: "nginx",
+							Name:  sharedVolume.Spec.ReferenceValue + "-syncer",
+							Image: "sharedvolume/volume-syncer:0.0.2",
 							Ports: []corev1.ContainerPort{
 								{
-									ContainerPort: 80,
+									ContainerPort: 8080,
 									Protocol:      corev1.ProtocolTCP,
 								},
 							},
@@ -768,7 +810,7 @@ func (r *SharedVolumeReconciler) reconcileService(ctx context.Context, sharedVol
 	log := logf.FromContext(ctx)
 
 	// Define Service name
-	serviceName := fmt.Sprintf("%s-svc", sharedVolume.Spec.ReferenceValue)
+	serviceName := fmt.Sprintf("%s", sharedVolume.Spec.ReferenceValue)
 	replicaSetName := sharedVolume.Spec.ReferenceValue
 
 	// Check if Service already exists
@@ -785,11 +827,11 @@ func (r *SharedVolumeReconciler) reconcileService(ctx context.Context, sharedVol
 		// Check if service port is correct (should be 80)
 		if len(existingSvc.Spec.Ports) > 0 {
 			currentPort := existingSvc.Spec.Ports[0].Port
-			if currentPort != 80 {
+			if currentPort != 8080 {
 				log.Info("Service has incorrect port configuration, will recreate",
 					"name", serviceName,
 					"currentPort", currentPort,
-					"expectedPort", 80)
+					"expectedPort", 8080)
 				needsUpdate = true
 			}
 		}
@@ -843,8 +885,8 @@ func (r *SharedVolumeReconciler) reconcileService(ctx context.Context, sharedVol
 			},
 			Ports: []corev1.ServicePort{
 				{
-					Port:       80,
-					TargetPort: intstr.FromInt(80),
+					Port:       8080,
+					TargetPort: intstr.FromInt(8080),
 					Protocol:   corev1.ProtocolTCP,
 				},
 			},
@@ -888,8 +930,8 @@ func (r *SharedVolumeReconciler) checkResourceReadiness(ctx context.Context, sha
 
 	if !nfsReady {
 		log.Info("NFS server not ready, marking SharedVolume as not ready")
-		if r.shouldUpdateReadinessStatus(sharedVolume, false) {
-			if err := r.updateReadinessStatus(ctx, sharedVolume, false); err != nil {
+		if r.shouldUpdateReadinessStatus(sharedVolume, false, false) {
+			if err := r.updateReadinessStatus(ctx, sharedVolume, false, false); err != nil {
 				return err
 			}
 		}
@@ -905,8 +947,8 @@ func (r *SharedVolumeReconciler) checkResourceReadiness(ctx context.Context, sha
 	if !pvcReady {
 		log.Info("PVC not ready yet", "name", sharedVolume.Spec.ReferenceValue)
 		// Don't check ReplicaSet if PVC is not ready, just update status to not ready
-		if r.shouldUpdateReadinessStatus(sharedVolume, false) {
-			if err := r.updateReadinessStatus(ctx, sharedVolume, false); err != nil {
+		if r.shouldUpdateReadinessStatus(sharedVolume, nfsReady, false) {
+			if err := r.updateReadinessStatus(ctx, sharedVolume, nfsReady, false); err != nil {
 				return err
 			}
 		}
@@ -929,11 +971,21 @@ func (r *SharedVolumeReconciler) checkResourceReadiness(ctx context.Context, sha
 		"overallReady", overallReady)
 
 	// Determine if status update is needed
-	if r.shouldUpdateReadinessStatus(sharedVolume, overallReady) {
+	if r.shouldUpdateReadinessStatus(sharedVolume, nfsReady, replicaSetReady) {
+		log.Info("Resource readiness changed, updating status",
+			"currentPhase", sharedVolume.Status.Phase,
+			"expectedPhase", r.determinePhase(nfsReady, replicaSetReady),
+			"nfsReady", nfsReady,
+			"replicaSetReady", replicaSetReady)
 		// Update the status
-		if err := r.updateReadinessStatus(ctx, sharedVolume, overallReady); err != nil {
+		if err := r.updateReadinessStatus(ctx, sharedVolume, nfsReady, replicaSetReady); err != nil {
 			return err
 		}
+	} else {
+		log.V(1).Info("Resource readiness unchanged, skipping status update",
+			"phase", sharedVolume.Status.Phase,
+			"nfsReady", nfsReady,
+			"replicaSetReady", replicaSetReady)
 	}
 
 	return nil
@@ -941,6 +993,8 @@ func (r *SharedVolumeReconciler) checkResourceReadiness(ctx context.Context, sha
 
 // isReplicaSetReady checks if the ReplicaSet associated with the SharedVolume is ready
 func (r *SharedVolumeReconciler) isReplicaSetReady(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) (bool, error) {
+	log := logf.FromContext(ctx)
+
 	// Get the ReplicaSet using the reference value
 	replicaSetName := sharedVolume.Spec.ReferenceValue
 	rs := &appsv1.ReplicaSet{}
@@ -950,15 +1004,27 @@ func (r *SharedVolumeReconciler) isReplicaSetReady(ctx context.Context, sharedVo
 	}, rs)
 
 	if err != nil {
+		log.Info("ReplicaSet not found", "name", replicaSetName, "error", err)
 		return false, client.IgnoreNotFound(err)
 	}
 
 	// Check if ReplicaSet is ready (desired replicas == ready replicas)
 	if rs.Spec.Replicas == nil {
+		log.Info("ReplicaSet has nil replicas", "name", replicaSetName)
 		return false, nil
 	}
 
-	return rs.Status.ReadyReplicas == *rs.Spec.Replicas, nil
+	desired := *rs.Spec.Replicas
+	ready := rs.Status.ReadyReplicas
+	isReady := ready == desired
+
+	log.Info("ReplicaSet readiness check",
+		"name", replicaSetName,
+		"desired", desired,
+		"ready", ready,
+		"isReady", isReady)
+
+	return isReady, nil
 }
 
 // isPVCReady checks if the PVC associated with the SharedVolume is bound
@@ -991,22 +1057,43 @@ func (r *SharedVolumeReconciler) isPVCReady(ctx context.Context, sharedVolume *s
 }
 
 // shouldUpdateReadinessStatus determines if a status update is needed based on the current status
-func (r *SharedVolumeReconciler) shouldUpdateReadinessStatus(sharedVolume *svv1alpha1.SharedVolume, resourcesReady bool) bool {
-	return resourcesReady != sharedVolume.Status.Ready
+func (r *SharedVolumeReconciler) shouldUpdateReadinessStatus(sharedVolume *svv1alpha1.SharedVolume, nfsReady, replicaSetReady bool) bool {
+	currentPhase := sharedVolume.Status.Phase
+	expectedPhase := r.determinePhase(nfsReady, replicaSetReady)
+	return currentPhase != expectedPhase
 }
 
-// updateReadinessStatus updates the SharedVolume status based on resource readiness
-func (r *SharedVolumeReconciler) updateReadinessStatus(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, resourcesReady bool) error {
+// determinePhase determines the correct phase based on NFS and ReplicaSet readiness
+func (r *SharedVolumeReconciler) determinePhase(nfsReady, replicaSetReady bool) string {
+	if nfsReady && replicaSetReady {
+		return "Ready"
+	} else if nfsReady && !replicaSetReady {
+		return "Preparing"
+	} else {
+		return "Pending"
+	}
+}
+
+// updateReadinessStatus updates the SharedVolume status based on NFS and ReplicaSet readiness
+func (r *SharedVolumeReconciler) updateReadinessStatus(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, nfsReady, replicaSetReady bool) error {
 	log := logf.FromContext(ctx)
 
+	phase := r.determinePhase(nfsReady, replicaSetReady)
+	overallReady := phase == "Ready"
+
 	err := r.updateStatusWithRetry(ctx, sharedVolume, func(sv *svv1alpha1.SharedVolume) {
-		sv.Status.Ready = resourcesReady
-		if resourcesReady {
-			sv.Status.Phase = "Ready"
+		sv.Status.Phase = phase
+		switch phase {
+		case "Ready":
 			sv.Status.Message = "SharedVolume is ready for use"
-		} else {
-			sv.Status.Phase = "Pending"
-			sv.Status.Message = "Waiting for resources to be ready (NFS server, PVC, or ReplicaSet)"
+		case "Preparing":
+			sv.Status.Message = "NFS server is ready, waiting for ReplicaSet to be ready"
+		case "Pending":
+			if !nfsReady {
+				sv.Status.Message = "Waiting for NFS server to be ready"
+			} else {
+				sv.Status.Message = "Waiting for resources to be ready"
+			}
 		}
 	})
 
@@ -1015,14 +1102,31 @@ func (r *SharedVolumeReconciler) updateReadinessStatus(ctx context.Context, shar
 		return err
 	}
 
-	if resourcesReady {
-		log.Info("SharedVolume is now ready",
+	if overallReady {
+		log.Info("SharedVolume resources are ready",
 			"name", sharedVolume.Name,
-			"referenceID", sharedVolume.Spec.ReferenceValue)
+			"referenceID", sharedVolume.Spec.ReferenceValue,
+			"phase", phase)
+
+		// Start sync operations if source is configured and sync controller is available
+		if r.SyncController != nil && sharedVolume.Spec.Source != nil {
+			if err := r.SyncController.StartSyncForSharedVolume(ctx, sharedVolume); err != nil {
+				log.Error(err, "Failed to start sync operations")
+				// Don't return error, sync is not critical for resource readiness
+			}
+		}
 	} else {
-		log.Info("SharedVolume is not ready",
+		log.Info("SharedVolume is not fully ready",
 			"name", sharedVolume.Name,
-			"referenceID", sharedVolume.Spec.ReferenceValue)
+			"referenceID", sharedVolume.Spec.ReferenceValue,
+			"phase", phase,
+			"nfsReady", nfsReady,
+			"replicaSetReady", replicaSetReady)
+
+		// Stop sync operations if they were running
+		if r.SyncController != nil {
+			r.SyncController.StopSyncForSharedVolume(sharedVolume)
+		}
 	}
 
 	return nil
@@ -1100,66 +1204,506 @@ func (r *SharedVolumeReconciler) ensureControllerNamespace(ctx context.Context) 
 func (r *SharedVolumeReconciler) cleanupResources(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) error {
 	log := logf.FromContext(ctx)
 
+	// Stop sync operations first
+	if r.SyncController != nil {
+		r.SyncController.StopSyncForSharedVolume(sharedVolume)
+	}
+
 	if sharedVolume.Spec.ReferenceValue == "" {
 		return nil
 	}
 
 	referenceValue := sharedVolume.Spec.ReferenceValue
 
-	// Delete ReplicaSet
+	log.Info("Starting comprehensive cleanup for SharedVolume", "name", sharedVolume.Name, "referenceValue", referenceValue)
+
+	// 1. Find and force delete ALL pods that use this SharedVolume (not just ReplicaSet pods)
+	r.cleanupAllPodsUsingSharedVolume(ctx, sharedVolume)
+
+	// 2. Delete ReplicaSet and any remaining pods
+	r.cleanupReplicaSet(ctx, sharedVolume, referenceValue)
+
+	// 3. Delete Service
+	r.cleanupService(ctx, sharedVolume, referenceValue)
+
+	// 4. Delete all PVCs related to this SharedVolume (both main and namespace-specific ones)
+	r.cleanupAllPVCs(ctx, sharedVolume, referenceValue)
+
+	// 5. Delete all PVs related to this SharedVolume (both main and namespace-specific ones)
+	r.cleanupAllPVs(ctx, sharedVolume, referenceValue)
+
+	// 6. Delete NFS Server if it was generated
+	r.cleanupNFSServer(ctx, sharedVolume)
+
+	log.Info("Completed comprehensive cleanup for SharedVolume", "name", sharedVolume.Name)
+	return nil
+}
+
+// cleanupAllPodsUsingSharedVolume finds and force deletes all pods that use this SharedVolume
+func (r *SharedVolumeReconciler) cleanupAllPodsUsingSharedVolume(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) {
+	log := logf.FromContext(ctx)
+
+	// Search across all namespaces for pods using this SharedVolume
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList); err != nil {
+		log.Error(err, "Failed to list pods for SharedVolume cleanup")
+		return
+	}
+
+	sharedVolumeName := sharedVolume.Name
+	sharedVolumeNamespace := sharedVolume.Namespace
+
+	for _, pod := range podList.Items {
+		// Check if pod has SharedVolume annotations
+		if pod.Annotations != nil {
+			for key, value := range pod.Annotations {
+				if strings.HasPrefix(key, "sharedvolume.sv/") && value == "true" {
+					// Extract the SharedVolume reference from the annotation key
+					refPart := strings.TrimPrefix(key, "sharedvolume.sv/")
+
+					var namespace, name string
+					if strings.Contains(refPart, "__") {
+						parts := strings.SplitN(refPart, "__", 2)
+						namespace = parts[0]
+						name = parts[1]
+					} else {
+						namespace = pod.Namespace
+						name = refPart
+					}
+
+					// Check if this pod references our SharedVolume
+					if name == sharedVolumeName && namespace == sharedVolumeNamespace {
+						log.Info("Found pod using SharedVolume, force deleting",
+							"pod", pod.Name,
+							"podNamespace", pod.Namespace,
+							"sharedVolume", sharedVolumeName)
+
+						if err := r.forceDeletePod(ctx, &pod); err != nil {
+							log.Error(err, "Failed to force delete pod using SharedVolume",
+								"pod", pod.Name, "namespace", pod.Namespace)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// cleanupReplicaSet deletes the ReplicaSet and any remaining pods
+func (r *SharedVolumeReconciler) cleanupReplicaSet(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, referenceValue string) {
+	log := logf.FromContext(ctx)
+
 	rs := &appsv1.ReplicaSet{}
 	if err := r.Get(ctx, client.ObjectKey{
 		Name:      referenceValue,
-		Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+		Namespace: sharedVolume.Namespace,
 	}, rs); err == nil {
+		// First, explicitly delete all pods owned by this ReplicaSet
+		podList := &corev1.PodList{}
+		if err := r.List(ctx, podList, client.InNamespace(sharedVolume.Namespace), client.MatchingLabels{"app": referenceValue}); err == nil {
+			for _, pod := range podList.Items {
+				log.Info("Force deleting ReplicaSet pod", "name", pod.Name, "namespace", pod.Namespace)
+				if err := r.forceDeletePod(ctx, &pod); err != nil {
+					log.Error(err, "Failed to force delete ReplicaSet pod", "name", pod.Name)
+				}
+			}
+		}
+
+		// Then delete the ReplicaSet
+		log.Info("Deleting ReplicaSet", "name", referenceValue, "namespace", sharedVolume.Namespace)
 		if err := r.Delete(ctx, rs); err != nil {
 			log.Error(err, "Failed to delete ReplicaSet", "name", referenceValue)
 		}
+	} else if !apierrors.IsNotFound(err) {
+		log.Error(err, "Failed to get ReplicaSet", "name", referenceValue)
 	}
+}
 
-	// Delete Service
-	svcName := fmt.Sprintf("%s-svc", referenceValue)
+// cleanupService deletes the service
+func (r *SharedVolumeReconciler) cleanupService(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, referenceValue string) {
+	log := logf.FromContext(ctx)
+
+	svcName := fmt.Sprintf("%s", referenceValue)
 	svc := &corev1.Service{}
 	if err := r.Get(ctx, client.ObjectKey{
 		Name:      svcName,
-		Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+		Namespace: sharedVolume.Namespace,
 	}, svc); err == nil {
+		log.Info("Deleting Service", "name", svcName, "namespace", sharedVolume.Namespace)
 		if err := r.Delete(ctx, svc); err != nil {
 			log.Error(err, "Failed to delete Service", "name", svcName)
 		}
+	} else if !apierrors.IsNotFound(err) {
+		log.Error(err, "Failed to get Service", "name", svcName)
 	}
+}
 
-	// Delete PVC
+// cleanupAllPVCs deletes all PVCs related to this SharedVolume
+func (r *SharedVolumeReconciler) cleanupAllPVCs(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, referenceValue string) {
+	log := logf.FromContext(ctx)
+
+	// 1. Delete the main PVC
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.Get(ctx, client.ObjectKey{
 		Name:      referenceValue,
-		Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+		Namespace: sharedVolume.Namespace,
 	}, pvc); err == nil {
-		if err := r.Delete(ctx, pvc); err != nil {
-			log.Error(err, "Failed to delete PVC", "name", referenceValue)
+		log.Info("Force deleting main PVC", "name", referenceValue, "namespace", sharedVolume.Namespace)
+		if err := r.forceDeletePVC(ctx, pvc); err != nil {
+			log.Error(err, "Failed to force delete main PVC", "name", referenceValue)
 		}
+	} else if !apierrors.IsNotFound(err) {
+		log.Error(err, "Failed to get main PVC", "name", referenceValue)
 	}
 
-	// Delete PV
+	// 2. Delete namespace-specific PVCs (pattern: referenceValue-namespace)
+	pvcList := &corev1.PersistentVolumeClaimList{}
+	if err := r.List(ctx, pvcList); err == nil {
+		for _, pvcItem := range pvcList.Items {
+			// Check if PVC name follows the pattern: referenceValue-namespace
+			if strings.HasPrefix(pvcItem.Name, referenceValue+"-") {
+				log.Info("Force deleting namespace-specific PVC", "name", pvcItem.Name, "namespace", pvcItem.Namespace)
+				if err := r.forceDeletePVC(ctx, &pvcItem); err != nil {
+					log.Error(err, "Failed to force delete namespace-specific PVC", "name", pvcItem.Name)
+				}
+			}
+		}
+	} else {
+		log.Error(err, "Failed to list PVCs for cleanup")
+	}
+}
+
+// cleanupAllPVs deletes all PVs related to this SharedVolume
+func (r *SharedVolumeReconciler) cleanupAllPVs(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, referenceValue string) {
+	log := logf.FromContext(ctx)
+
+	// 1. Delete the main PV
 	pvName := fmt.Sprintf("pv-%s", referenceValue)
 	pv := &corev1.PersistentVolume{}
 	if err := r.Get(ctx, client.ObjectKey{Name: pvName}, pv); err == nil {
-		if err := r.Delete(ctx, pv); err != nil {
-			log.Error(err, "Failed to delete PV", "name", pvName)
+		log.Info("Force deleting main PV", "name", pvName)
+		if err := r.forceDeletePV(ctx, pv); err != nil {
+			log.Error(err, "Failed to force delete main PV", "name", pvName)
 		}
+	} else if !apierrors.IsNotFound(err) {
+		log.Error(err, "Failed to get main PV", "name", pvName)
 	}
 
-	// Delete NFS Server if it was generated
+	// 2. Delete namespace-specific PVs (pattern: referenceValue-namespace)
+	pvList := &corev1.PersistentVolumeList{}
+	if err := r.List(ctx, pvList); err == nil {
+		for _, pvItem := range pvList.Items {
+			// Check if PV name follows the pattern: referenceValue-namespace
+			if strings.HasPrefix(pvItem.Name, referenceValue+"-") {
+				log.Info("Force deleting namespace-specific PV", "name", pvItem.Name)
+				if err := r.forceDeletePV(ctx, &pvItem); err != nil {
+					log.Error(err, "Failed to force delete namespace-specific PV", "name", pvItem.Name)
+				}
+			}
+		}
+	} else {
+		log.Error(err, "Failed to list PVs for cleanup")
+	}
+}
+
+// cleanupNFSServer deletes the NFS server if it was generated
+func (r *SharedVolumeReconciler) cleanupNFSServer(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) {
+	log := logf.FromContext(ctx)
+
 	if sharedVolume.Spec.NfsServer != nil && sharedVolume.Spec.NfsServer.Name != "" {
 		nfsServer := &nfsv1alpha1.NfsServer{}
 		if err := r.Get(ctx, client.ObjectKey{
 			Name:      sharedVolume.Spec.NfsServer.Name,
-			Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+			Namespace: sharedVolume.Namespace,
 		}, nfsServer); err == nil {
+			log.Info("Deleting NFS Server", "name", sharedVolume.Spec.NfsServer.Name, "namespace", sharedVolume.Namespace)
 			if err := r.Delete(ctx, nfsServer); err != nil {
 				log.Error(err, "Failed to delete NfsServer", "name", sharedVolume.Spec.NfsServer.Name)
 			}
+		} else if !apierrors.IsNotFound(err) {
+			log.Error(err, "Failed to get NFS Server", "name", sharedVolume.Spec.NfsServer.Name)
 		}
+	}
+}
+
+// forceDeletePVC attempts to delete a PVC and removes finalizers if deletion is stuck
+func (r *SharedVolumeReconciler) forceDeletePVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+	log := logf.FromContext(ctx)
+
+	log.Info("Deleting PVC", "name", pvc.Name, "namespace", pvc.Namespace)
+
+	// First check if PVC has problematic finalizers and remove them proactively
+	if len(pvc.Finalizers) > 0 {
+		log.Info("PVC has finalizers, removing them before deletion to prevent getting stuck",
+			"name", pvc.Name,
+			"namespace", pvc.Namespace,
+			"finalizers", pvc.Finalizers)
+
+		if err := r.removePVCFinalizersWithRetry(ctx, pvc); err != nil {
+			log.Error(err, "Failed to proactively remove PVC finalizers", "name", pvc.Name)
+			// Continue with deletion attempt even if finalizer removal failed
+		}
+	}
+
+	// Now try normal deletion
+	if err := r.Delete(ctx, pvc); err != nil {
+		log.Error(err, "Failed to delete PVC normally", "name", pvc.Name)
+		return err
+	}
+
+	// Check if PVC is stuck in terminating state due to finalizers
+	// Give it a moment to delete normally first
+	var updatedPVC corev1.PersistentVolumeClaim
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pvc), &updatedPVC); err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Info("PVC successfully deleted", "name", pvc.Name, "namespace", pvc.Namespace)
+			return nil
+		}
+		return err
+	}
+
+	// PVC still exists, check if it's terminating and has finalizers
+	if updatedPVC.DeletionTimestamp != nil && len(updatedPVC.Finalizers) > 0 {
+		log.Info("PVC is stuck terminating, removing finalizers",
+			"name", pvc.Name,
+			"namespace", pvc.Namespace,
+			"finalizers", updatedPVC.Finalizers)
+
+		// Remove all finalizers to force deletion with retry
+		if err := r.removePVCFinalizersWithRetry(ctx, &updatedPVC); err != nil {
+			log.Error(err, "Failed to remove finalizers from PVC", "name", pvc.Name)
+			return err
+		}
+	}
+
+	return nil
+}
+
+// forceDeletePV attempts to delete a PV and removes finalizers if deletion is stuck
+func (r *SharedVolumeReconciler) forceDeletePV(ctx context.Context, pv *corev1.PersistentVolume) error {
+	log := logf.FromContext(ctx)
+
+	log.Info("Deleting PV", "name", pv.Name)
+
+	// First check if PV has CSI or other problematic finalizers and remove them proactively
+	if len(pv.Finalizers) > 0 {
+		log.Info("PV has finalizers, removing them before deletion to prevent getting stuck",
+			"name", pv.Name,
+			"finalizers", pv.Finalizers)
+
+		if err := r.removePVFinalizersWithRetry(ctx, pv); err != nil {
+			log.Error(err, "Failed to proactively remove PV finalizers", "name", pv.Name)
+			// Continue with deletion attempt even if finalizer removal failed
+		}
+	}
+
+	// Now try normal deletion
+	if err := r.Delete(ctx, pv); err != nil {
+		log.Error(err, "Failed to delete PV normally", "name", pv.Name)
+		return err
+	}
+
+	// Check if PV is stuck in terminating state due to finalizers
+	// Give it a moment to delete normally first
+	var updatedPV corev1.PersistentVolume
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pv), &updatedPV); err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Info("PV successfully deleted", "name", pv.Name)
+			return nil
+		}
+		return err
+	}
+
+	// PV still exists, check if it's terminating and has finalizers
+	if updatedPV.DeletionTimestamp != nil && len(updatedPV.Finalizers) > 0 {
+		log.Info("PV is stuck terminating, removing finalizers",
+			"name", pv.Name,
+			"finalizers", updatedPV.Finalizers)
+
+		// Remove all finalizers to force deletion with retry
+		if err := r.removePVFinalizersWithRetry(ctx, &updatedPV); err != nil {
+			log.Error(err, "Failed to remove finalizers from PV", "name", pv.Name)
+			return err
+		}
+	}
+
+	return nil
+}
+
+// removeFinalizerWithRetry removes a finalizer from the SharedVolume with retry and conflict handling
+func (r *SharedVolumeReconciler) removeFinalizerWithRetry(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, finalizerName string) error {
+	log := logf.FromContext(ctx)
+
+	// Maximum number of retries
+	maxRetries := 3
+	retryCount := 0
+
+	for {
+		// Get the latest version of the object before updating to prevent conflicts
+		var latestSharedVolume svv1alpha1.SharedVolume
+		if err := r.Get(ctx, client.ObjectKeyFromObject(sharedVolume), &latestSharedVolume); err != nil {
+			if apierrors.IsNotFound(err) {
+				// Object already deleted, nothing to do
+				log.Info("SharedVolume already deleted, no need to remove finalizer")
+				return nil
+			}
+			log.Error(err, "Failed to get latest SharedVolume before finalizer removal")
+			return err
+		}
+
+		// Check if the finalizer is still present
+		if !containsString(latestSharedVolume.Finalizers, finalizerName) {
+			log.Info("Finalizer already removed")
+			*sharedVolume = latestSharedVolume
+			return nil
+		}
+
+		// Remove the finalizer from the latest version
+		latestSharedVolume.Finalizers = removeString(latestSharedVolume.Finalizers, finalizerName)
+
+		// Update the object
+		if err := r.Update(ctx, &latestSharedVolume); err != nil {
+			if apierrors.IsConflict(err) && retryCount < maxRetries {
+				retryCount++
+				log.Info("Conflict detected while removing finalizer, retrying", "retryCount", retryCount)
+				time.Sleep(time.Millisecond * 100 * time.Duration(retryCount)) // Backoff with each retry
+				continue
+			}
+			if apierrors.IsNotFound(err) {
+				// Object was deleted during our retry, which is fine
+				log.Info("SharedVolume was deleted during finalizer removal")
+				return nil
+			}
+			log.Error(err, "Failed to remove finalizer after retries")
+			return err
+		}
+
+		// Success - update our reference with the latest version
+		*sharedVolume = latestSharedVolume
+		log.Info("Successfully removed finalizer", "finalizer", finalizerName)
+		return nil
+	}
+}
+
+// removePVFinalizersWithRetry removes finalizers from a PV with retry logic to handle conflicts
+func (r *SharedVolumeReconciler) removePVFinalizersWithRetry(ctx context.Context, pv *corev1.PersistentVolume) error {
+	log := logf.FromContext(ctx)
+
+	maxRetries := 3
+	retryCount := 0
+
+	for {
+		// Get the latest version of the PV
+		var latestPV corev1.PersistentVolume
+		if err := r.Get(ctx, types.NamespacedName{Name: pv.Name}, &latestPV); err != nil {
+			if apierrors.IsNotFound(err) {
+				log.Info("PV already deleted during finalizer removal", "name", pv.Name)
+				return nil
+			}
+			return err
+		}
+
+		// Remove all finalizers
+		latestPV.Finalizers = []string{}
+
+		// Try to update
+		if err := r.Update(ctx, &latestPV); err != nil {
+			if apierrors.IsConflict(err) && retryCount < maxRetries {
+				retryCount++
+				log.Info("Conflict updating PV finalizers, retrying",
+					"name", pv.Name,
+					"retry", retryCount,
+					"maxRetries", maxRetries)
+				continue
+			}
+			return err
+		}
+
+		log.Info("Successfully removed finalizers from PV", "name", pv.Name)
+		return nil
+	}
+}
+
+// removePVCFinalizersWithRetry removes finalizers from a PVC with retry logic to handle conflicts
+func (r *SharedVolumeReconciler) removePVCFinalizersWithRetry(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+	log := logf.FromContext(ctx)
+
+	maxRetries := 3
+	retryCount := 0
+
+	for {
+		// Get the latest version of the PVC
+		var latestPVC corev1.PersistentVolumeClaim
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      pvc.Name,
+			Namespace: pvc.Namespace,
+		}, &latestPVC); err != nil {
+			if apierrors.IsNotFound(err) {
+				log.Info("PVC already deleted during finalizer removal", "name", pvc.Name, "namespace", pvc.Namespace)
+				return nil
+			}
+			return err
+		}
+
+		// Remove all finalizers
+		latestPVC.Finalizers = []string{}
+
+		// Try to update
+		if err := r.Update(ctx, &latestPVC); err != nil {
+			if apierrors.IsConflict(err) && retryCount < maxRetries {
+				retryCount++
+				log.Info("Conflict updating PVC finalizers, retrying",
+					"name", pvc.Name,
+					"namespace", pvc.Namespace,
+					"retry", retryCount,
+					"maxRetries", maxRetries)
+				continue
+			}
+			return err
+		}
+
+		log.Info("Successfully removed finalizers from PVC", "name", pvc.Name, "namespace", pvc.Namespace)
+		return nil
+	}
+}
+
+// forceDeletePod attempts to delete a pod and removes all finalizers if deletion is stuck
+func (r *SharedVolumeReconciler) forceDeletePod(ctx context.Context, pod *corev1.Pod) error {
+	log := logf.FromContext(ctx)
+
+	log.Info("Deleting pod", "name", pod.Name, "namespace", pod.Namespace)
+
+	// First try normal deletion
+	if err := r.Delete(ctx, pod); err != nil {
+		log.Error(err, "Failed to delete pod normally", "name", pod.Name)
+		return err
+	}
+
+	// Check if pod is stuck in terminating state due to finalizers
+	// Give it a moment to delete normally first
+	var updatedPod corev1.Pod
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pod), &updatedPod); err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Info("Pod successfully deleted", "name", pod.Name, "namespace", pod.Namespace)
+			return nil
+		}
+		return err
+	}
+
+	// Pod still exists, check if it's terminating and has finalizers
+	if updatedPod.DeletionTimestamp != nil && len(updatedPod.Finalizers) > 0 {
+		log.Info("Pod is stuck terminating, removing finalizers",
+			"name", pod.Name,
+			"namespace", pod.Namespace,
+			"finalizers", updatedPod.Finalizers)
+
+		// Remove all finalizers to force deletion
+		updatedPod.Finalizers = []string{}
+		if err := r.Update(ctx, &updatedPod); err != nil {
+			log.Error(err, "Failed to remove finalizers from pod", "name", pod.Name)
+			return err
+		}
+		log.Info("Successfully removed finalizers from pod", "name", pod.Name)
 	}
 
 	return nil
@@ -1172,6 +1716,16 @@ func (r *SharedVolumeReconciler) SetupWithManager(mgr ctrl.Manager, controllerNa
 	if r.ControllerNamespace == "" {
 		// Default to "shared-volume-controller" if not specified
 		r.ControllerNamespace = "shared-volume-controller"
+	}
+
+	// Initialize sync controller
+	r.SyncController = NewSyncController(mgr.GetClient(), mgr.GetScheme())
+
+	// Add a runnable to recover sync operations after the cache is synced
+	if err := mgr.Add(&syncRecoveryRunnable{
+		syncController: r.SyncController,
+	}); err != nil {
+		return err
 	}
 
 	// Note: We don't create the namespace here because the cache isn't started yet.
@@ -1190,6 +1744,50 @@ func (r *SharedVolumeReconciler) SetupWithManager(mgr ctrl.Manager, controllerNa
 		//	handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), &svv1alpha1.SharedVolume{})).
 		Named("sharedvolume").
 		Complete(r)
+}
+
+// syncRecoveryRunnable is a runnable that recovers sync operations for existing SharedVolumes
+// after the controller starts and the cache is synced
+type syncRecoveryRunnable struct {
+	syncController *SyncController
+	recovered      bool // Flag to ensure recovery only runs once
+}
+
+// Start implements the Runnable interface
+func (r *syncRecoveryRunnable) Start(ctx context.Context) error {
+	log := logf.FromContext(ctx).WithName("sync-recovery")
+
+	// Only run recovery once
+	if r.recovered {
+		log.Info("Sync recovery already completed, skipping")
+		return nil
+	}
+
+	// Wait a moment for the cache to be fully synced
+	select {
+	case <-time.After(5 * time.Second):
+		// Continue with recovery
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	log.Info("Starting sync recovery for existing SharedVolumes")
+
+	if err := r.syncController.RecoverSyncOperations(ctx); err != nil {
+		log.Error(err, "Failed to recover sync operations")
+		// Don't return error - this shouldn't stop the controller
+	}
+
+	// Mark recovery as completed
+	r.recovered = true
+
+	// This runnable completes after recovery, so return nil to indicate completion
+	return nil
+}
+
+// NeedLeaderElection returns true since sync recovery should only happen on the leader
+func (r *syncRecoveryRunnable) NeedLeaderElection() bool {
+	return true
 }
 
 // containsString checks if a slice contains a specific string

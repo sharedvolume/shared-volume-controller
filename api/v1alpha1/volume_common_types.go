@@ -1,5 +1,5 @@
 /*
-Common types for SharedVolume and ClusterSharedVolume specs.
+Common types for SharedVolume specs.
 */
 
 package v1alpha1
@@ -39,14 +39,15 @@ type VolumeSourceSpec struct {
 	SSH *SSHSourceSpec `json:"ssh,omitempty"`
 }
 
-// VolumeSpecBase contains common fields for SharedVolume and ClusterSharedVolume.
+// VolumeSpecBase contains common fields for SharedVolume.
 type VolumeSpecBase struct {
 	NfsServer         *NfsServerSpec    `json:"nfsServer,omitempty"`
 	MountPath         string            `json:"mountPath"`
-	SyncInterval      string            `json:"syncInterval,omitempty"`
+	SyncInterval      string            `json:"syncInterval,omitempty"` // Sync interval like 30s, 5m, 2h, 1d
+	SyncTimeout       string            `json:"syncTimeout,omitempty"`  // Timeout for sync operations like 120s
 	Storage           *StorageSpec      `json:"storage,omitempty"`
 	Source            *VolumeSourceSpec `json:"source,omitempty"`
 	StorageClassName  string            `json:"storageClassName,omitempty"`
-	ResourceNamespace string            `json:"resourceNamespace,omitempty"` // Namespace for the resource, used in ClusterSharedVolume
+	ResourceNamespace string            `json:"resourceNamespace,omitempty"` // Namespace for the resource
 	ReferenceValue    string            `json:"referenceValue,omitempty"`    // Shared reference value for related resources
 }

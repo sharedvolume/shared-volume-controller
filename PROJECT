@@ -22,15 +22,6 @@ resources:
     defaulting: true
     validation: true
     webhookVersion: v1
-- api:
-    crdVersion: v1
-    namespaced: true
-  controller: true
-  domain: sharedvolume.io
-  group: sv
-  kind: ClusterSharedVolume
-  path: github.com/sharedvolume/shared-volume-controller/api/v1alpha1
-  version: v1alpha1
 - core: true
   group: batch
   kind: CronJob

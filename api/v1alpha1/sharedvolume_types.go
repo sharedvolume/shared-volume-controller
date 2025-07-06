@@ -30,9 +30,7 @@ type SharedVolumeSpec struct {
 
 // SharedVolumeStatus defines the observed state of SharedVolume.
 type SharedVolumeStatus struct {
-	// Ready indicates whether the SharedVolume is ready for use
-	Ready bool `json:"ready"`
-	// Phase indicates the current phase of the SharedVolume
+	// Phase indicates the current phase of the SharedVolume (Pending, Preparing, Ready)
 	Phase string `json:"phase,omitempty"`
 	// Message provides additional information about the current phase
 	Message string `json:"message,omitempty"`
@@ -49,7 +47,6 @@ type SharedVolumeStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=sv,scope=Namespaced
-// +kubebuilder:printcolumn:name="Ready",type=boolean,JSONPath=".status.ready",description="SharedVolume Ready"
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase",description="Current Phase"
 // +kubebuilder:printcolumn:name="NFS Address",type=string,JSONPath=".status.nfsServerAddress",description="NFS Server Address"
 // +kubebuilder:printcolumn:name="Mount Path",type=string,JSONPath=".spec.mountPath",description="Mount Path"

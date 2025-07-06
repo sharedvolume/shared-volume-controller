@@ -44,8 +44,7 @@ import (
 )
 
 const (
-	testVolume1 = "sharedvolume.io/sv/volume1"
-	testVolume2 = "sharedvolume.io/sv/volume2"
+	testNamespace = "test-namespace"
 )
 
 func TestPodAnnotatorHandle(t *testing.T) {
@@ -56,18 +55,18 @@ func TestPodAnnotatorHandle(t *testing.T) {
 		sharedVolumeName   string
 	}{
 		{
-			name:               "Pod with sharedvolume.io/sv/ annotation set to true",
-			annotations:        map[string]string{"sharedvolume.io/sv/test-volume": "true"},
+			name:               "Pod with sharedvolume.sv annotation",
+			annotations:        map[string]string{SharedVolumeAnnotationKey: "test-volume"},
 			expectSharedVolume: true,
 			sharedVolumeName:   "test-volume",
 		},
 		{
-			name:               "Pod with sharedvolume.io/sv/ annotation set to false",
-			annotations:        map[string]string{"sharedvolume.io/sv/test-volume": "false"},
+			name:               "Pod with empty sharedvolume.sv annotation",
+			annotations:        map[string]string{SharedVolumeAnnotationKey: ""},
 			expectSharedVolume: false,
 		},
 		{
-			name:               "Pod without sharedvolume.io annotation",
+			name:               "Pod without sharedvolume annotation",
 			annotations:        map[string]string{"other-annotation": "value"},
 			expectSharedVolume: false,
 		},
@@ -109,7 +108,7 @@ func createTestPod(annotations map[string]string) *corev1.Pod {
 			Containers: []corev1.Container{
 				{
 					Name:  "test-container",
-					Image: "nginx",
+					Image: "sharedvolume/volume-syncer:0.0.2",
 				},
 			},
 		},
@@ -190,15 +189,17 @@ func extractSharedVolumeNames(pod *corev1.Pod) []string {
 		return names
 	}
 
-	const prefix = "sharedvolume.io/sv/"
-	for key, value := range pod.Annotations {
-		if strings.HasPrefix(key, prefix) && value == "true" {
-			name := strings.TrimPrefix(key, prefix)
-			if name != "" {
-				names = append(names, name)
+	// Check SharedVolume annotation: "sharedvolume.sv": "sv1,sv2,sv3"
+	if sharedVolumeList, exists := pod.Annotations[SharedVolumeAnnotationKey]; exists && sharedVolumeList != "" {
+		svNames := strings.Split(sharedVolumeList, ",")
+		for _, svName := range svNames {
+			svName = strings.TrimSpace(svName)
+			if svName != "" {
+				names = append(names, svName)
 			}
 		}
 	}
+
 	return names
 }
 
@@ -208,30 +209,43 @@ func TestExtractSharedVolumeAnnotations(t *testing.T) {
 	testCases := []struct {
 		name        string
 		annotations map[string]string
-		expected    []string
+		expected    []SharedVolumeRef
 	}{
 		{
 			name:        "Single shared volume annotation",
-			annotations: map[string]string{testVolume1: "true"},
-			expected:    []string{"volume1"},
+			annotations: map[string]string{SharedVolumeAnnotationKey: "volume1"},
+			expected: []SharedVolumeRef{
+				{
+					Namespace: testNamespace,
+					Name:      "volume1",
+				},
+			},
 		},
 		{
 			name: "Multiple shared volume annotations",
 			annotations: map[string]string{
-				testVolume1: "true",
-				testVolume2: "true",
+				SharedVolumeAnnotationKey: "volume1,volume2",
 			},
-			expected: []string{"volume1", "volume2"},
+			expected: []SharedVolumeRef{
+				{
+					Namespace: testNamespace,
+					Name:      "volume1",
+				},
+				{
+					Namespace: testNamespace,
+					Name:      "volume2",
+				},
+			},
 		},
 		{
-			name:        "Annotation with false value",
-			annotations: map[string]string{testVolume1: "false"},
-			expected:    []string{},
+			name:        "Empty annotation value",
+			annotations: map[string]string{SharedVolumeAnnotationKey: ""},
+			expected:    []SharedVolumeRef{},
 		},
 		{
 			name:        "No shared volume annotations",
 			annotations: map[string]string{"other": "annotation"},
-			expected:    []string{},
+			expected:    []SharedVolumeRef{},
 		},
 	}
 
@@ -239,6 +253,8 @@ func TestExtractSharedVolumeAnnotations(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-pod",
+					Namespace:   testNamespace,
 					Annotations: tc.annotations,
 				},
 			}

@@ -22,9 +22,6 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the shared-volume-controller itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-- clustersharedvolume_admin_role.yaml
-- clustersharedvolume_editor_role.yaml
-- clustersharedvolume_viewer_role.yaml
 - sharedvolume_admin_role.yaml
 - sharedvolume_editor_role.yaml
 - sharedvolume_viewer_role.yaml
