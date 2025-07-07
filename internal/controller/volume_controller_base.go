@@ -1505,6 +1505,11 @@ func (r *VolumeControllerBase) UpdateReadinessStatus(ctx context.Context, volume
 					volumeObj.SetMessage("Waiting for resources to be ready")
 				}
 			}
+
+			// Set NFS server address if available and NFS is ready
+			if nfsReady && spec.NfsServer != nil && spec.NfsServer.URL != "" {
+				volumeObj.SetNfsServerAddress(spec.NfsServer.URL)
+			}
 		}
 	})
 

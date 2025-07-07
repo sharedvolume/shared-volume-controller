@@ -14,7 +14,23 @@ spec:
     singular: clustersharedvolume
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.nfsServerAddress
+      name: NFS Address
+      type: string
+    - jsonPath: .spec.mountPath
+      name: Mount Path
+      type: string
+    - jsonPath: .spec.syncInterval
+      name: SyncInterval
+      type: string
+    - jsonPath: .spec.storage.capacity
+      name: Capacity
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: ClusterSharedVolume is the Schema for the clustersharedvolumes

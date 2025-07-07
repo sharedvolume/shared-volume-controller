@@ -43,6 +43,10 @@ const (
 	SharedVolumePodFinalizer = "sharedvolume.sv/pod-cleanup"
 	// SharedVolumeAnnotationKey for SharedVolume annotation
 	SharedVolumeAnnotationKey = "sharedvolume.sv"
+	// ClusterSharedVolumeAnnotationKey for ClusterSharedVolume annotation
+	ClusterSharedVolumeAnnotationKey = "sharedvolume.csv"
+	// ClusterSharedVolumeOperationNamespace is the namespace used for ClusterSharedVolume operations
+	ClusterSharedVolumeOperationNamespace = "shared-volume-controller-operation"
 )
 
 // +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=fail,sideEffects=None,groups="",resources=pods,verbs=create;update,versions=v1,name=mpod.kb.io,admissionReviewVersions=v1
@@ -64,10 +68,19 @@ func (a *PodAnnotator) Handle(ctx context.Context, req admission.Request) admiss
 
 	logger.Info("Processing pod", "name", pod.Name, "namespace", pod.Namespace, "operation", req.Operation)
 
-	// Skip processing if pod is being deleted
+	// Handle pod deletion - clean up PV/PVC if no other pods are using them
 	if pod.DeletionTimestamp != nil {
-		logger.Info("Pod is being deleted, skipping webhook processing", "name", pod.Name, "namespace", pod.Namespace)
-		return admission.Allowed("Pod is being deleted, skipping processing")
+		logger.Info("Pod is being deleted, checking for cleanup", "name", pod.Name, "namespace", pod.Namespace)
+
+		// Only process if pod has our finalizer
+		if a.hasSharedVolumeFinalizer(pod) {
+			if err := a.handlePodDeletion(ctx, pod); err != nil {
+				logger.Error(err, "failed to handle pod deletion cleanup", "name", pod.Name, "namespace", pod.Namespace)
+				return admission.Errored(http.StatusInternalServerError, err)
+			}
+		}
+
+		return admission.Allowed("Pod deletion processed")
 	}
 
 	// Skip processing for update operations if the pod already has our finalizer and volumes
@@ -108,6 +121,7 @@ func (a *PodAnnotator) Handle(ctx context.Context, req admission.Request) admiss
 type SharedVolumeRef struct {
 	Namespace string
 	Name      string
+	IsCluster bool // true for ClusterSharedVolume, false for SharedVolume
 }
 
 // extractSharedVolumeAnnotations extracts SharedVolume references from annotations
@@ -129,6 +143,24 @@ func (a *PodAnnotator) extractSharedVolumeAnnotations(pod *corev1.Pod) []SharedV
 				sharedVolumes = append(sharedVolumes, SharedVolumeRef{
 					Namespace: pod.Namespace,
 					Name:      svName,
+					IsCluster: false, // This is a regular SharedVolume
+				})
+			}
+		}
+	}
+
+	// Look for ClusterSharedVolume annotation: "sharedvolume.csv": "csv1,csv2,csv3"
+	if clusterSharedVolumeList, exists := pod.Annotations[ClusterSharedVolumeAnnotationKey]; exists && clusterSharedVolumeList != "" {
+		// Split by comma and trim spaces
+		csvNames := strings.Split(clusterSharedVolumeList, ",")
+		for _, csvName := range csvNames {
+			csvName = strings.TrimSpace(csvName)
+			if csvName != "" {
+				// ClusterSharedVolumes are cluster-scoped, so no namespace needed
+				sharedVolumes = append(sharedVolumes, SharedVolumeRef{
+					Namespace: "", // ClusterSharedVolumes don't have a namespace
+					Name:      csvName,
+					IsCluster: true, // This is a ClusterSharedVolume
 				})
 			}
 		}
@@ -137,34 +169,69 @@ func (a *PodAnnotator) extractSharedVolumeAnnotations(pod *corev1.Pod) []SharedV
 	return sharedVolumes
 }
 
-// processSharedVolume handles the creation of PV, PVC, and volume mounting for a SharedVolume
+// processSharedVolume handles the creation of PV, PVC, and volume mounting for a SharedVolume or ClusterSharedVolume
 func (a *PodAnnotator) processSharedVolume(ctx context.Context, pod *corev1.Pod, svRef SharedVolumeRef) error {
 	logger := log.FromContext(ctx).WithName("shared-volume-processor")
 
-	// Fetch the SharedVolume resource
-	sharedVolume := &svv1alpha1.SharedVolume{}
-	err := a.Client.Get(ctx, types.NamespacedName{
-		Name:      svRef.Name,
-		Namespace: svRef.Namespace,
-	}, sharedVolume)
-	if err != nil {
-		return fmt.Errorf("failed to get SharedVolume %s/%s: %w", svRef.Namespace, svRef.Name, err)
+	var sharedVolumeSpec *svv1alpha1.SharedVolumeSpec
+	var referenceValue string
+
+	if svRef.IsCluster {
+		// Fetch the ClusterSharedVolume resource
+		clusterSharedVolume := &svv1alpha1.ClusterSharedVolume{}
+		err := a.Client.Get(ctx, types.NamespacedName{
+			Name: svRef.Name, // ClusterSharedVolume has no namespace
+		}, clusterSharedVolume)
+		if err != nil {
+			return fmt.Errorf("failed to get ClusterSharedVolume %s: %w", svRef.Name, err)
+		}
+
+		logger.Info("Processing ClusterSharedVolume", "clusterSharedVolume", svRef.Name, "referenceValue", clusterSharedVolume.Spec.ReferenceValue, "pod", pod.Name)
+		// Convert ClusterSharedVolumeSpec to SharedVolumeSpec (they have the same structure)
+		sharedVolumeSpec = &svv1alpha1.SharedVolumeSpec{
+			VolumeSpecBase: clusterSharedVolume.Spec.VolumeSpecBase,
+		}
+		referenceValue = clusterSharedVolume.Spec.ReferenceValue
+	} else {
+		// Fetch the SharedVolume resource
+		sharedVolume := &svv1alpha1.SharedVolume{}
+		err := a.Client.Get(ctx, types.NamespacedName{
+			Name:      svRef.Name,
+			Namespace: svRef.Namespace,
+		}, sharedVolume)
+		if err != nil {
+			return fmt.Errorf("failed to get SharedVolume %s/%s: %w", svRef.Namespace, svRef.Name, err)
+		}
+
+		logger.Info("Processing SharedVolume", "sharedVolume", svRef.Name, "referenceValue", sharedVolume.Spec.ReferenceValue, "namespace", svRef.Namespace, "pod", pod.Name)
+		sharedVolumeSpec = &sharedVolume.Spec
+		referenceValue = sharedVolume.Spec.ReferenceValue
 	}
 
-	logger.Info("Processing SharedVolume", "sharedVolume", svRef.Name, "namespace", svRef.Namespace, "pod", pod.Name)
+	// Determine the resource namespace based on volume type
+	var resourceNamespace string
+	if svRef.IsCluster {
+		// ClusterSharedVolume uses a static namespace for resource creation
+		resourceNamespace = ClusterSharedVolumeOperationNamespace
+	} else {
+		// SharedVolume uses the pod's namespace
+		resourceNamespace = pod.Namespace
+	}
 
-	// Create PV if it doesn't exist
-	if err := a.ensurePersistentVolume(ctx, sharedVolume, pod.Namespace); err != nil {
+	// Create PV if it doesn't exist - use pod namespace for consistent naming with PVC
+	if err := a.ensurePersistentVolumeGeneric(ctx, sharedVolumeSpec, referenceValue, pod.Namespace, svRef.Name, resourceNamespace); err != nil {
 		return fmt.Errorf("failed to ensure PersistentVolume: %w", err)
 	}
 
-	// Create PVC if it doesn't exist
-	if err := a.ensurePersistentVolumeClaim(ctx, sharedVolume, pod.Namespace); err != nil {
+	// For webhook, always create PVC in the pod's namespace
+	// The controller will manage the main PVC in the operation namespace
+	pvcNamespace := pod.Namespace
+	if err := a.ensurePersistentVolumeClaimGeneric(ctx, sharedVolumeSpec, referenceValue, pvcNamespace); err != nil {
 		return fmt.Errorf("failed to ensure PersistentVolumeClaim: %w", err)
 	}
 
-	// Add volume mount to pod
-	a.addVolumeToPod(pod, sharedVolume, pod.Namespace)
+	// Add volume mount to pod (use the PVC in the pod's namespace)
+	a.addVolumeToPodGeneric(pod, sharedVolumeSpec, referenceValue, pvcNamespace)
 
 	logger.Info("Successfully processed volume", "volume", svRef.Name, "pod", pod.Name)
 	return nil
@@ -204,10 +271,10 @@ func (a *PodAnnotator) ensurePersistentVolume(ctx context.Context, sv *svv1alpha
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
 				CSI: &corev1.CSIPersistentVolumeSource{
 					Driver:       "nfs.csi.k8s.io",
-					VolumeHandle: fmt.Sprintf("%s/share##", sv.Status.NfsServerAddress),
+					VolumeHandle: fmt.Sprintf("%s%s/%s-%s##", sv.Status.NfsServerAddress, sv.Spec.NfsServer.Path, sv.Name, sv.Namespace),
 					VolumeAttributes: map[string]string{
 						"server": sv.Status.NfsServerAddress,
-						"share":  a.buildSharePath(sv.Spec.NfsServer.Path, sv.Name, sv.Namespace),
+						"share":  fmt.Sprintf("%s/%s-%s", sv.Spec.NfsServer.Path, sv.Name, sv.Namespace),
 					},
 				},
 			},
@@ -268,8 +335,8 @@ func (a *PodAnnotator) ensurePersistentVolumeClaim(ctx context.Context, sv *svv1
 }
 
 // ensurePersistentVolumeGeneric creates a PV if it doesn't already exist, using the generic interface
-func (a *PodAnnotator) ensurePersistentVolumeGeneric(ctx context.Context, spec *svv1alpha1.SharedVolumeSpec, referenceValue, resourceNamespace string) error {
-	pvName := fmt.Sprintf(pvPvcNameTemplate, referenceValue, resourceNamespace)
+func (a *PodAnnotator) ensurePersistentVolumeGeneric(ctx context.Context, spec *svv1alpha1.SharedVolumeSpec, referenceValue, pvNamespace, volumeName, volumeNamespace string) error {
+	pvName := fmt.Sprintf(pvPvcNameTemplate, referenceValue, pvNamespace)
 
 	// Check if PV already exists
 	existingPV := &corev1.PersistentVolume{}
@@ -294,8 +361,10 @@ func (a *PodAnnotator) ensurePersistentVolumeGeneric(ctx context.Context, spec *
 		return fmt.Errorf("nfsServer spec is required")
 	}
 
-	// Build share path
-	sharePath := a.buildSharePathGeneric(nfsServer.Path, referenceValue, resourceNamespace)
+	// Build share path - match controller's folder structure: {basePath}/{volumeName}-{namespace}
+	// For csv1 ClusterSharedVolume, this will create: /csv1-shared-volume-controller-operation
+	// For sv1 SharedVolume in myns namespace, this will create: /sv1-myns
+	sharePath := fmt.Sprintf("%s/%s-%s", nfsServer.Path, volumeName, volumeNamespace)
 
 	// Create new PV
 	pv := &corev1.PersistentVolume{
@@ -316,7 +385,7 @@ func (a *PodAnnotator) ensurePersistentVolumeGeneric(ctx context.Context, spec *
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
 				CSI: &corev1.CSIPersistentVolumeSource{
 					Driver:       "nfs.csi.k8s.io",
-					VolumeHandle: fmt.Sprintf("%s/share##", nfsServer.URL),
+					VolumeHandle: fmt.Sprintf("%s%s##", nfsServer.URL, sharePath),
 					VolumeAttributes: map[string]string{
 						"server": nfsServer.URL,
 						"share":  sharePath,
@@ -380,6 +449,57 @@ func (a *PodAnnotator) ensurePersistentVolumeClaimGeneric(ctx context.Context, s
 
 	if err := a.Client.Create(ctx, pvc); err != nil {
 		return fmt.Errorf("failed to create PersistentVolumeClaim: %w", err)
+	}
+
+	return nil
+}
+
+// ensureProxyPersistentVolumeClaim creates a PVC in the pod's namespace that references the same PV
+// This is needed for ClusterSharedVolume where the main PVC is in shared-volume-controller-operation
+// but the pod needs a PVC in its own namespace to reference
+func (a *PodAnnotator) ensureProxyPersistentVolumeClaim(ctx context.Context, spec *svv1alpha1.SharedVolumeSpec, referenceValue, mainNamespace, podNamespace string) error {
+	pvName := fmt.Sprintf(pvPvcNameTemplate, referenceValue, mainNamespace)
+	pvcName := fmt.Sprintf(pvPvcNameTemplate, referenceValue, mainNamespace) // Use same PVC name for consistency
+
+	// Check if proxy PVC already exists in pod's namespace
+	existingPVC := &corev1.PersistentVolumeClaim{}
+	err := a.Client.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: podNamespace}, existingPVC)
+	if err == nil {
+		// PVC already exists
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to check if proxy PVC exists: %w", err)
+	}
+
+	// Get storage spec
+	storage := spec.Storage
+	if storage == nil {
+		return fmt.Errorf("storage spec is required")
+	}
+
+	// Create new proxy PVC
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: podNamespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.ReadWriteMany,
+			},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse(storage.Capacity),
+				},
+			},
+			VolumeName:       pvName,      // Reference the existing PV
+			StorageClassName: new(string), // Empty string to prevent dynamic provisioning
+		},
+	}
+
+	if err := a.Client.Create(ctx, pvc); err != nil {
+		return fmt.Errorf("failed to create proxy PersistentVolumeClaim: %w", err)
 	}
 
 	return nil
@@ -505,24 +625,6 @@ func (a *PodAnnotator) addVolumeToPodGeneric(pod *corev1.Pod, spec *svv1alpha1.S
 	}
 }
 
-// buildSharePath constructs the NFS share path, ensuring the base path ends with '/'
-func (a *PodAnnotator) buildSharePath(basePath, svName, svNamespace string) string {
-	// Ensure basePath ends with '/'
-	if !strings.HasSuffix(basePath, "/") {
-		basePath += "/"
-	}
-	return fmt.Sprintf("%s%s-%s", basePath, svName, svNamespace)
-}
-
-// buildSharePathGeneric constructs the NFS share path, ensuring the base path ends with '/'
-func (a *PodAnnotator) buildSharePathGeneric(basePath, referenceValue, resourceNamespace string) string {
-	// Ensure basePath ends with '/'
-	if !strings.HasSuffix(basePath, "/") {
-		basePath += "/"
-	}
-	return fmt.Sprintf("%s%s-%s", basePath, referenceValue, resourceNamespace)
-}
-
 // addSharedVolumeFinalizer adds a finalizer to the pod to ensure cleanup when deleted
 func (a *PodAnnotator) addSharedVolumeFinalizer(pod *corev1.Pod) {
 	// Check if finalizer already exists
@@ -544,4 +646,208 @@ func (a *PodAnnotator) hasSharedVolumeFinalizer(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// handlePodDeletion handles cleanup when a pod with shared volumes is being deleted
+func (a *PodAnnotator) handlePodDeletion(ctx context.Context, pod *corev1.Pod) error {
+	logger := log.FromContext(ctx).WithName("pod-deletion-handler")
+
+	// Extract shared volume references from the pod annotations
+	sharedVolumes := a.extractSharedVolumeAnnotations(pod)
+	if len(sharedVolumes) == 0 {
+		logger.Info("No shared volumes found in pod, removing finalizer", "pod", pod.Name)
+		return a.removePodFinalizer(ctx, pod)
+	}
+
+	// For each shared volume, check if any other pods are still using it
+	for _, svRef := range sharedVolumes {
+		if err := a.cleanupSharedVolumeIfUnused(ctx, svRef, pod); err != nil {
+			logger.Error(err, "failed to cleanup shared volume", "volume", svRef.Name, "pod", pod.Name)
+			return err
+		}
+	}
+
+	// Remove finalizer from pod after successful cleanup
+	return a.removePodFinalizer(ctx, pod)
+}
+
+// cleanupSharedVolumeIfUnused cleans up PV/PVC for a shared volume if no other pods are using it
+func (a *PodAnnotator) cleanupSharedVolumeIfUnused(ctx context.Context, svRef SharedVolumeRef, deletingPod *corev1.Pod) error {
+	logger := log.FromContext(ctx).WithName("shared-volume-cleanup")
+
+	// Get the referenceValue from the SharedVolume/ClusterSharedVolume resource
+	var referenceValue string
+	if svRef.IsCluster {
+		clusterSharedVolume := &svv1alpha1.ClusterSharedVolume{}
+		if err := a.Client.Get(ctx, types.NamespacedName{Name: svRef.Name}, clusterSharedVolume); err != nil {
+			return fmt.Errorf("failed to get ClusterSharedVolume %s for cleanup: %w", svRef.Name, err)
+		}
+		referenceValue = clusterSharedVolume.Spec.ReferenceValue
+	} else {
+		sharedVolume := &svv1alpha1.SharedVolume{}
+		if err := a.Client.Get(ctx, types.NamespacedName{Name: svRef.Name, Namespace: svRef.Namespace}, sharedVolume); err != nil {
+			return fmt.Errorf("failed to get SharedVolume %s/%s for cleanup: %w", svRef.Namespace, svRef.Name, err)
+		}
+		referenceValue = sharedVolume.Spec.ReferenceValue
+	}
+
+	// For webhook cleanup, we need to clean up PV/PVC created in the pod's namespace
+	// (since webhook now creates everything in pod namespace)
+	pvcName := fmt.Sprintf(pvPvcNameTemplate, referenceValue, deletingPod.Namespace)
+	pvName := fmt.Sprintf(pvPvcNameTemplate, referenceValue, deletingPod.Namespace)
+
+	// Check if any other pods are still using this specific SharedVolume/ClusterSharedVolume
+	stillInUse, err := a.isVolumeStillInUseByOtherPods(ctx, svRef, deletingPod)
+	if err != nil {
+		return fmt.Errorf("failed to check if volume is still in use: %w", err)
+	}
+
+	if stillInUse {
+		logger.Info("Volume still in use by other pods, skipping cleanup",
+			"volume", svRef.Name,
+			"isCluster", svRef.IsCluster,
+			"pvc", pvcName,
+			"namespace", deletingPod.Namespace)
+		return nil
+	}
+
+	logger.Info("Volume no longer in use, cleaning up",
+		"volume", svRef.Name,
+		"isCluster", svRef.IsCluster,
+		"pvc", pvcName,
+		"pv", pvName,
+		"namespace", deletingPod.Namespace)
+
+	// Delete PVC first
+	if err := a.deletePVC(ctx, pvcName, deletingPod.Namespace); err != nil {
+		return fmt.Errorf("failed to delete PVC: %w", err)
+	}
+
+	// Delete PV
+	if err := a.deletePV(ctx, pvName); err != nil {
+		return fmt.Errorf("failed to delete PV: %w", err)
+	}
+
+	logger.Info("Successfully cleaned up shared volume resources", "volume", svRef.Name, "pvc", pvcName, "pv", pvName)
+	return nil
+}
+
+// isPVCStillInUse checks if any other pods (excluding the deleting pod) are still using the specific SharedVolume/ClusterSharedVolume
+func (a *PodAnnotator) isPVCStillInUse(ctx context.Context, pvcName, namespace, deletingPodName string) (bool, error) {
+	// List all pods in the same namespace where the PVC exists
+	podList := &corev1.PodList{}
+	if err := a.Client.List(ctx, podList, client.InNamespace(namespace)); err != nil {
+		return false, fmt.Errorf("failed to list pods in namespace %s: %w", namespace, err)
+	}
+
+	for _, pod := range podList.Items {
+		// Skip the pod that's being deleted
+		if pod.Name == deletingPodName {
+			continue
+		}
+
+		// Skip pods that are also being deleted
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+
+		// Check if this pod uses the PVC directly
+		for _, volume := range pod.Spec.Volumes {
+			if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == pvcName {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+// isVolumeStillInUseByOtherPods checks if a specific SharedVolume or ClusterSharedVolume is still being used by other pods
+func (a *PodAnnotator) isVolumeStillInUseByOtherPods(ctx context.Context, svRef SharedVolumeRef, deletingPod *corev1.Pod) (bool, error) {
+	// List all pods in all namespaces to check for SharedVolume/ClusterSharedVolume usage
+	podList := &corev1.PodList{}
+	if err := a.Client.List(ctx, podList); err != nil {
+		return false, fmt.Errorf("failed to list pods: %w", err)
+	}
+
+	for _, pod := range podList.Items {
+		// Skip the pod that's being deleted
+		if pod.Name == deletingPod.Name && pod.Namespace == deletingPod.Namespace {
+			continue
+		}
+
+		// Skip pods that are also being deleted
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+
+		// Check if this pod uses the same SharedVolume or ClusterSharedVolume
+		podSharedVolumes := a.extractSharedVolumeAnnotations(&pod)
+		for _, podSvRef := range podSharedVolumes {
+			// Check if this pod references the same volume
+			if podSvRef.IsCluster == svRef.IsCluster && podSvRef.Name == svRef.Name {
+				// For SharedVolume, also check namespace match
+				if !svRef.IsCluster && podSvRef.Namespace != svRef.Namespace {
+					continue
+				}
+				// Found another pod using the same volume
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+// deletePVC deletes a PVC with proper error handling
+func (a *PodAnnotator) deletePVC(ctx context.Context, pvcName, namespace string) error {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+		},
+	}
+
+	err := a.Client.Delete(ctx, pvc)
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete PVC %s/%s: %w", namespace, pvcName, err)
+	}
+
+	return nil
+}
+
+// deletePV deletes a PV with proper error handling
+func (a *PodAnnotator) deletePV(ctx context.Context, pvName string) error {
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: pvName,
+		},
+	}
+
+	err := a.Client.Delete(ctx, pv)
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete PV %s: %w", pvName, err)
+	}
+
+	return nil
+}
+
+// removePodFinalizer removes the shared volume finalizer from the pod
+func (a *PodAnnotator) removePodFinalizer(ctx context.Context, pod *corev1.Pod) error {
+	// Remove the finalizer
+	var updatedFinalizers []string
+	for _, finalizer := range pod.Finalizers {
+		if finalizer != SharedVolumePodFinalizer {
+			updatedFinalizers = append(updatedFinalizers, finalizer)
+		}
+	}
+
+	pod.Finalizers = updatedFinalizers
+
+	// Update the pod to remove the finalizer
+	if err := a.Client.Update(ctx, pod); err != nil {
+		return fmt.Errorf("failed to remove finalizer from pod: %w", err)
+	}
+
+	return nil
 }

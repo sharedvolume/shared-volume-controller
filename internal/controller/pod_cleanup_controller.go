@@ -36,9 +36,23 @@ import (
 )
 
 const (
-	SharedVolumePodFinalizer  = "sharedvolume.sv/pod-cleanup"
-	SharedVolumeAnnotationKey = "sharedvolume.sv"
+	SharedVolumePodFinalizer         = "sharedvolume.sv/pod-cleanup"
+	SharedVolumeAnnotationKey        = "sharedvolume.sv"
+	ClusterSharedVolumeAnnotationKey = "sharedvolume.csv"
 )
+
+// VolumeRef represents a reference to either a SharedVolume or ClusterSharedVolume
+type VolumeRef struct {
+	Name      string
+	Namespace string
+	IsCluster bool // true for ClusterSharedVolume, false for SharedVolume
+}
+
+// SharedVolumeRef represents a reference to a SharedVolume (legacy, for backward compatibility)
+type SharedVolumeRef struct {
+	Namespace string
+	Name      string
+}
 
 // PodCleanupReconciler reconciles Pod deletions for SharedVolume cleanup
 type PodCleanupReconciler struct {
@@ -228,13 +242,7 @@ func (r *PodCleanupReconciler) addFinalizer(ctx context.Context, pod *corev1.Pod
 	return nil
 }
 
-// SharedVolumeRef represents a SharedVolume reference with namespace and name
-type SharedVolumeRef struct {
-	Namespace string
-	Name      string
-}
-
-// extractSharedVolumeAnnotations extracts SharedVolume references from pod annotations
+// extractSharedVolumeAnnotations extracts SharedVolume and ClusterSharedVolume references from pod annotations
 func (r *PodCleanupReconciler) extractSharedVolumeAnnotations(pod *corev1.Pod) []SharedVolumeRef {
 	var sharedVolumes []SharedVolumeRef
 
@@ -258,6 +266,22 @@ func (r *PodCleanupReconciler) extractSharedVolumeAnnotations(pod *corev1.Pod) [
 		}
 	}
 
+	// Look for ClusterSharedVolume annotation: "sharedvolume.csv": "csv1,csv2,csv3"
+	if clusterSharedVolumeList, exists := pod.Annotations[ClusterSharedVolumeAnnotationKey]; exists && clusterSharedVolumeList != "" {
+		// Split by comma and trim spaces
+		csvNames := strings.Split(clusterSharedVolumeList, ",")
+		for _, csvName := range csvNames {
+			csvName = strings.TrimSpace(csvName)
+			if csvName != "" {
+				// ClusterSharedVolumes use the static operation namespace
+				sharedVolumes = append(sharedVolumes, SharedVolumeRef{
+					Namespace: ClusterSharedVolumeOperationNamespace, // Static namespace for ClusterSharedVolumes
+					Name:      csvName,
+				})
+			}
+		}
+	}
+
 	return sharedVolumes
 }
 
@@ -268,7 +292,7 @@ func (r *PodCleanupReconciler) cleanupSharedVolumeResources(ctx context.Context,
 	// Extract SharedVolume references from annotations
 	svRefs := r.extractSharedVolumeAnnotations(pod)
 	if len(svRefs) == 0 {
-		log.Info("No SharedVolume annotations found in pod", "pod", pod.Name)
+		log.Info("No SharedVolume or ClusterSharedVolume annotations found in pod", "pod", pod.Name)
 		return nil
 	}
 
@@ -278,31 +302,61 @@ func (r *PodCleanupReconciler) cleanupSharedVolumeResources(ctx context.Context,
 		"volumeCount", len(svRefs))
 
 	for _, svRef := range svRefs {
-		log.Info("Cleaning up resources for SharedVolume",
-			"sharedVolume", svRef.Name,
-			"namespace", svRef.Namespace,
-			"pod", pod.Name)
+		// Determine if this is a ClusterSharedVolume based on namespace
+		isClusterSharedVolume := svRef.Namespace == "shared-volume-controller-operation"
 
-		// Get the SharedVolume to obtain its ReferenceValue
-		sv := &svv1alpha1.SharedVolume{}
-		if err := r.Get(ctx, types.NamespacedName{
-			Namespace: svRef.Namespace,
-			Name:      svRef.Name,
-		}, sv); err != nil {
-			if apierrors.IsNotFound(err) {
-				log.Info("SharedVolume not found, skipping cleanup",
+		var referenceValue string
+		var resourceNamespace string
+
+		if isClusterSharedVolume {
+			log.Info("Cleaning up resources for ClusterSharedVolume",
+				"clusterSharedVolume", svRef.Name,
+				"pod", pod.Name)
+
+			// Get the ClusterSharedVolume to obtain its ReferenceValue
+			csv := &svv1alpha1.ClusterSharedVolume{}
+			if err := r.Get(ctx, types.NamespacedName{
+				Name: svRef.Name, // ClusterSharedVolume has no namespace
+			}, csv); err != nil {
+				if apierrors.IsNotFound(err) {
+					log.Info("ClusterSharedVolume not found, skipping cleanup",
+						"clusterSharedVolume", svRef.Name)
+					continue
+				}
+				log.Error(err, "Failed to get ClusterSharedVolume",
+					"clusterSharedVolume", svRef.Name)
+				return err
+			}
+
+			referenceValue = csv.Spec.ReferenceValue
+			resourceNamespace = pod.Namespace // pod's namespace for ClusterSharedVolume too
+		} else {
+			log.Info("Cleaning up resources for SharedVolume",
+				"sharedVolume", svRef.Name,
+				"namespace", svRef.Namespace,
+				"pod", pod.Name)
+
+			// Get the SharedVolume to obtain its ReferenceValue
+			sv := &svv1alpha1.SharedVolume{}
+			if err := r.Get(ctx, types.NamespacedName{
+				Namespace: svRef.Namespace,
+				Name:      svRef.Name,
+			}, sv); err != nil {
+				if apierrors.IsNotFound(err) {
+					log.Info("SharedVolume not found, skipping cleanup",
+						"sharedVolume", svRef.Name,
+						"namespace", svRef.Namespace)
+					continue
+				}
+				log.Error(err, "Failed to get SharedVolume",
 					"sharedVolume", svRef.Name,
 					"namespace", svRef.Namespace)
-				continue
+				return err
 			}
-			log.Error(err, "Failed to get SharedVolume",
-				"sharedVolume", svRef.Name,
-				"namespace", svRef.Namespace)
-			return err
-		}
 
-		referenceValue := sv.Spec.ReferenceValue
-		resourceNamespace := pod.Namespace // pod's namespace for SharedVolume
+			referenceValue = sv.Spec.ReferenceValue
+			resourceNamespace = pod.Namespace // pod's namespace for SharedVolume
+		}
 
 		// Clean up pod-specific PVC and PV created by the webhook for this pod
 		if err := r.cleanupPodSpecificResourcesByRef(ctx, svRef, referenceValue, resourceNamespace); err != nil {
@@ -480,14 +534,28 @@ func (r *PodCleanupReconciler) isPodUsingSharedVolume(pod *corev1.Pod, sv *svv1a
 	return false
 }
 
-// isVolumeStillInUseByRef checks if any other pods are still using this SharedVolume
+// isVolumeStillInUseByRef checks if any other pods are still using this SharedVolume or ClusterSharedVolume
 func (r *PodCleanupReconciler) isVolumeStillInUseByRef(ctx context.Context, svRef SharedVolumeRef) (bool, error) {
 	log := logf.FromContext(ctx)
 
-	// Check only the specific namespace for SharedVolume
-	podList := &corev1.PodList{}
-	if err := r.List(ctx, podList, client.InNamespace(svRef.Namespace)); err != nil {
-		log.Error(err, "Failed to list pods in namespace", "namespace", svRef.Namespace)
+	// Determine if this is a ClusterSharedVolume based on namespace
+	isClusterSharedVolume := svRef.Namespace == ClusterSharedVolumeOperationNamespace
+
+	var podList *corev1.PodList = &corev1.PodList{}
+	var err error
+
+	if isClusterSharedVolume {
+		// For ClusterSharedVolume, check pods in ALL namespaces since it's cluster-scoped
+		log.Info("Checking all namespaces for ClusterSharedVolume usage", "clusterSharedVolume", svRef.Name)
+		err = r.List(ctx, podList)
+	} else {
+		// For SharedVolume, check only the specific namespace
+		log.Info("Checking specific namespace for SharedVolume usage", "sharedVolume", svRef.Name, "namespace", svRef.Namespace)
+		err = r.List(ctx, podList, client.InNamespace(svRef.Namespace))
+	}
+
+	if err != nil {
+		log.Error(err, "Failed to list pods", "volume", svRef.Name, "isCluster", isClusterSharedVolume)
 		return false, err
 	}
 
@@ -497,18 +565,20 @@ func (r *PodCleanupReconciler) isVolumeStillInUseByRef(ctx context.Context, svRe
 			log.Info("Found pod still using volume",
 				"pod", pod.Name,
 				"namespace", pod.Namespace,
-				"volume", svRef.Name)
+				"volume", svRef.Name,
+				"isCluster", isClusterSharedVolume)
 			return true, nil
 		}
 	}
 
 	log.Info("No active pods found using volume",
 		"volume", svRef.Name,
-		"namespace", svRef.Namespace)
+		"namespace", svRef.Namespace,
+		"isCluster", isClusterSharedVolume)
 	return false, nil
 }
 
-// isPodUsingVolumeByRef checks if a pod is using the specified SharedVolume
+// isPodUsingVolumeByRef checks if a pod is using the specified SharedVolume or ClusterSharedVolume
 func (r *PodCleanupReconciler) isPodUsingVolumeByRef(pod *corev1.Pod, svRef SharedVolumeRef) bool {
 	// Skip pods that are being deleted or already terminated
 	if pod.DeletionTimestamp != nil {
@@ -532,6 +602,21 @@ func (r *PodCleanupReconciler) isPodUsingVolumeByRef(pod *corev1.Pod, svRef Shar
 			}
 		}
 	}
+
+	// Check for ClusterSharedVolume annotation: "sharedvolume.csv": "csv1,csv2,csv3"
+	if clusterSharedVolumeList, exists := pod.Annotations[ClusterSharedVolumeAnnotationKey]; exists && clusterSharedVolumeList != "" {
+		csvNames := strings.Split(clusterSharedVolumeList, ",")
+		for _, csvName := range csvNames {
+			csvName = strings.TrimSpace(csvName)
+			if csvName != "" {
+				// For ClusterSharedVolume, check if the svRef is from the operation namespace and matches the name
+				if svRef.Namespace == ClusterSharedVolumeOperationNamespace && csvName == svRef.Name {
+					return true
+				}
+			}
+		}
+	}
+
 	return false
 }
 

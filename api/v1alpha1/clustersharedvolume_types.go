@@ -50,6 +50,11 @@ type ClusterSharedVolumeStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="NFS Address",type=string,JSONPath=`.status.nfsServerAddress`
+// +kubebuilder:printcolumn:name="Mount Path",type=string,JSONPath=`.spec.mountPath`
+// +kubebuilder:printcolumn:name="SyncInterval",type=string,JSONPath=`.spec.syncInterval`
+// +kubebuilder:printcolumn:name="Capacity",type=string,JSONPath=`.spec.storage.capacity`
 
 // ClusterSharedVolume is the Schema for the clustersharedvolumes API
 type ClusterSharedVolume struct {

@@ -218,6 +218,7 @@ func TestExtractSharedVolumeAnnotations(t *testing.T) {
 				{
 					Namespace: testNamespace,
 					Name:      "volume1",
+					IsCluster: false,
 				},
 			},
 		},
@@ -230,10 +231,60 @@ func TestExtractSharedVolumeAnnotations(t *testing.T) {
 				{
 					Namespace: testNamespace,
 					Name:      "volume1",
+					IsCluster: false,
 				},
 				{
 					Namespace: testNamespace,
 					Name:      "volume2",
+					IsCluster: false,
+				},
+			},
+		},
+		{
+			name:        "Single cluster shared volume annotation",
+			annotations: map[string]string{ClusterSharedVolumeAnnotationKey: "csv1"},
+			expected: []SharedVolumeRef{
+				{
+					Namespace: "",
+					Name:      "csv1",
+					IsCluster: true,
+				},
+			},
+		},
+		{
+			name: "Multiple cluster shared volume annotations",
+			annotations: map[string]string{
+				ClusterSharedVolumeAnnotationKey: "csv1,csv2",
+			},
+			expected: []SharedVolumeRef{
+				{
+					Namespace: "",
+					Name:      "csv1",
+					IsCluster: true,
+				},
+				{
+					Namespace: "",
+					Name:      "csv2",
+					IsCluster: true,
+				},
+			},
+		},
+		{
+			name: "Mixed shared volume and cluster shared volume annotations",
+			annotations: map[string]string{
+				SharedVolumeAnnotationKey:        "volume1",
+				ClusterSharedVolumeAnnotationKey: "csv1",
+			},
+			expected: []SharedVolumeRef{
+				{
+					Namespace: testNamespace,
+					Name:      "volume1",
+					IsCluster: false,
+				},
+				{
+					Namespace: "",
+					Name:      "csv1",
+					IsCluster: true,
 				},
 			},
 		},
