@@ -23,11 +23,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	svv1alpha1 "github.com/sharedvolume/shared-volume-controller/api/v1alpha1"
+	"github.com/sharedvolume/shared-volume-controller/internal/controller/base"
+	"github.com/sharedvolume/shared-volume-controller/internal/controller/types"
 )
 
 // SharedVolumeReconciler reconciles a SharedVolume object
 type SharedVolumeReconciler struct {
-	*VolumeControllerBase
+	*base.VolumeController
 }
 
 // +kubebuilder:rbac:groups=sv.sharedvolume.io,resources=sharedvolumes,verbs=get;list;watch;create;update;patch;delete
@@ -54,19 +56,19 @@ type SharedVolumeReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *SharedVolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	// Use the fully generic reconciliation pattern
-	return r.VolumeControllerBase.ReconcileGeneric(ctx, req, VolumeReconcileConfig{
-		VolumeObjFactory: func() VolumeObject {
+	return r.VolumeController.ReconcileGeneric(ctx, req, types.VolumeReconcileConfig{
+		VolumeObjFactory: func() types.VolumeObject {
 			return &svv1alpha1.SharedVolume{}
 		},
 		APIVersion:    "sv.sharedvolume.io/v1alpha1",
 		Kind:          "SharedVolume",
 		FinalizerName: "shared-volume-controller.sharedvolume.io/finalizer",
 		Namespace:     req.Namespace, // Explicitly pass the namespace from the request
-		CreateReadyCallback: func() func(context.Context, VolumeObject) error {
-			return r.VolumeControllerBase.CreateSyncReadyCallback()
+		CreateReadyCallback: func() func(context.Context, types.VolumeObject) error {
+			return r.VolumeController.CreateSyncReadyCallback()
 		},
-		CreateNotReadyCallback: func() func(context.Context, VolumeObject) error {
-			return r.VolumeControllerBase.CreateSyncNotReadyCallback()
+		CreateNotReadyCallback: func() func(context.Context, types.VolumeObject) error {
+			return r.VolumeController.CreateSyncNotReadyCallback()
 		},
 	})
 }
@@ -74,19 +76,19 @@ func (r *SharedVolumeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 // SetupWithManager sets up the controller with the Manager.
 func (r *SharedVolumeReconciler) SetupWithManager(mgr ctrl.Manager, controllerNamespace string) error {
 	// Create sync controller setup hook using the generic pattern
-	preSetupHook := r.VolumeControllerBase.CreateSyncControllerSetupHook(
+	preSetupHook := r.VolumeController.CreateSyncControllerSetupHook(
 		NewSyncController, // Sync controller factory function
 		func(ctx context.Context) error {
 			// Recovery function for sync operations
-			if r.VolumeControllerBase.SyncController != nil {
-				return r.VolumeControllerBase.SyncController.RecoverSyncOperations(ctx)
+			if r.VolumeController.SyncController != nil {
+				return r.VolumeController.SyncController.RecoverSyncOperations(ctx)
 			}
 			return nil
 		},
 	)
 
 	// Use the fully generic controller setup pattern
-	return r.VolumeControllerBase.SetupGenericController(mgr, ControllerSetupConfig{
+	return r.VolumeController.SetupGenericController(mgr, types.ControllerSetupConfig{
 		VolumeType:          &svv1alpha1.SharedVolume{},
 		ControllerName:      "sharedvolume",
 		ControllerNamespace: controllerNamespace,

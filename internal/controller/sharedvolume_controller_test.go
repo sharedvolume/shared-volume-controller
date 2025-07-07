@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	svv1alpha1 "github.com/sharedvolume/shared-volume-controller/api/v1alpha1"
+	"github.com/sharedvolume/shared-volume-controller/internal/controller/base"
 )
 
 var _ = Describe("SharedVolume Controller", func() {
@@ -81,7 +82,7 @@ var _ = Describe("SharedVolume Controller", func() {
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &SharedVolumeReconciler{
-				VolumeControllerBase: NewVolumeControllerBase(k8sClient, k8sClient.Scheme(), "shared-volume-controller", nil),
+				VolumeController: base.NewVolumeController(k8sClient, k8sClient.Scheme(), "shared-volume-controller"),
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -115,9 +116,8 @@ var _ = Describe("SharedVolume Controller", func() {
 			}
 
 			// Call FillAndValidateSpec and validate results
-			generateNfsServer := false // We're already providing NfsServer
-			base := NewVolumeControllerBase(k8sClient, k8sClient.Scheme(), "shared-volume-controller", nil)
-			err := base.FillAndValidateSpec(sharedVolume, generateNfsServer, "test-namespace")
+			baseController := base.NewVolumeController(k8sClient, k8sClient.Scheme(), "shared-volume-controller")
+			err := baseController.FillAndValidateSpec(sharedVolume, "test-namespace")
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify Path is defaulted to "/"
@@ -146,9 +146,8 @@ var _ = Describe("SharedVolume Controller", func() {
 			}
 
 			// Call FillAndValidateSpec and validate results
-			generateNfsServer := false // We're already providing NfsServer
-			base := NewVolumeControllerBase(k8sClient, k8sClient.Scheme(), "shared-volume-controller", nil)
-			err := base.FillAndValidateSpec(sharedVolume, generateNfsServer, "test-namespace")
+			baseController := base.NewVolumeController(k8sClient, k8sClient.Scheme(), "shared-volume-controller")
+			err := baseController.FillAndValidateSpec(sharedVolume, "test-namespace")
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify Path is preserved

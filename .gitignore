@@ -8,6 +8,13 @@
 *.so
 *.dylib
 
+# Built binaries
+main
+manager
+controller-gen*
+kustomize*
+setup-envtest*
+
 # Test binary, built with `go test -c`
 *.test
 

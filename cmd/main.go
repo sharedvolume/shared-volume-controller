@@ -41,8 +41,8 @@ import (
 
 	svv1alpha1 "github.com/sharedvolume/shared-volume-controller/api/v1alpha1"
 	"github.com/sharedvolume/shared-volume-controller/internal/controller"
+	"github.com/sharedvolume/shared-volume-controller/internal/controller/base"
 	webhookv1 "github.com/sharedvolume/shared-volume-controller/internal/webhook/v1"
-	webhookv1alpha1 "github.com/sharedvolume/shared-volume-controller/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -211,37 +211,27 @@ func main() {
 	}
 
 	if err := (&controller.SharedVolumeReconciler{
-		VolumeControllerBase: controller.NewVolumeControllerBase(mgr.GetClient(), mgr.GetScheme(), controllerNamespace, nil),
+		VolumeController: base.NewVolumeController(mgr.GetClient(), mgr.GetScheme(), controllerNamespace),
 	}).SetupWithManager(mgr, controllerNamespace); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SharedVolume")
 		os.Exit(1)
 	}
 
 	if err := (&controller.ClusterSharedVolumeReconciler{
-		VolumeControllerBase: controller.NewVolumeControllerBase(mgr.GetClient(), mgr.GetScheme(), controllerNamespace, nil),
+		VolumeController: base.NewVolumeController(mgr.GetClient(), mgr.GetScheme(), controllerNamespace),
 	}).SetupWithManager(mgr, controllerNamespace); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ClusterSharedVolume")
 		os.Exit(1)
 	}
 
-	if err := (&controller.PodCleanupReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	if err := controller.NewPodCleanupReconciler(mgr.GetClient(), mgr.GetScheme()).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PodCleanup")
 		os.Exit(1)
 	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1alpha1.SetupSharedVolumeWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "SharedVolume")
-			os.Exit(1)
-		}
-	}
-	// nolint:goconst
-	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1.SetupCronJobWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "CronJob")
+		if err := webhookv1.SetupPodWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "Pod")
 			os.Exit(1)
 		}
 	}

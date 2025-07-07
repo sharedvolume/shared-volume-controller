@@ -29,10 +29,3 @@ func SetupPodWebhookWithManager(mgr ctrl.Manager) error {
 	})
 	return nil
 }
-
-// SetupCronJobWebhookWithManager sets up webhooks with the manager
-// This is kept for compatibility with existing main.go structure
-func SetupCronJobWebhookWithManager(mgr ctrl.Manager) error {
-	// Register the Pod webhook
-	return SetupPodWebhookWithManager(mgr)
-}
