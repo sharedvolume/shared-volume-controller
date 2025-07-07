@@ -300,7 +300,11 @@ func (a *PodAnnotator) ensurePersistentVolumeClaim(ctx context.Context, sv *svv1
 		Namespace: podNamespace,
 	}, existingPVC)
 	if err == nil {
-		// PVC already exists
+		// PVC exists, check if it's in terminating state
+		if existingPVC.DeletionTimestamp != nil {
+			return fmt.Errorf("PVC %s/%s is in terminating state, cannot create pod", podNamespace, pvcName)
+		}
+		// PVC exists and is not terminating
 		return nil
 	}
 	if !errors.IsNotFound(err) {
@@ -414,7 +418,11 @@ func (a *PodAnnotator) ensurePersistentVolumeClaimGeneric(ctx context.Context, s
 		Namespace: resourceNamespace,
 	}, existingPVC)
 	if err == nil {
-		// PVC already exists
+		// PVC exists, check if it's in terminating state
+		if existingPVC.DeletionTimestamp != nil {
+			return fmt.Errorf("PVC %s/%s is in terminating state, cannot create pod", resourceNamespace, pvcName)
+		}
+		// PVC exists and is not terminating
 		return nil
 	}
 	if !errors.IsNotFound(err) {
@@ -465,7 +473,11 @@ func (a *PodAnnotator) ensureProxyPersistentVolumeClaim(ctx context.Context, spe
 	existingPVC := &corev1.PersistentVolumeClaim{}
 	err := a.Client.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: podNamespace}, existingPVC)
 	if err == nil {
-		// PVC already exists
+		// PVC exists, check if it's in terminating state
+		if existingPVC.DeletionTimestamp != nil {
+			return fmt.Errorf("proxy PVC %s/%s is in terminating state, cannot create pod", podNamespace, pvcName)
+		}
+		// PVC exists and is not terminating
 		return nil
 	}
 	if !errors.IsNotFound(err) {
