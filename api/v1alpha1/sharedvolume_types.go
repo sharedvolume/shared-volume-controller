@@ -74,3 +74,70 @@ type SharedVolumeList struct {
 func init() {
 	SchemeBuilder.Register(&SharedVolume{}, &SharedVolumeList{})
 }
+
+// VolumeObject interface implementation for SharedVolume
+
+// GetVolumeSpec returns the common volume specification
+func (sv *SharedVolume) GetVolumeSpec() *VolumeSpecBase {
+	return &sv.Spec.VolumeSpecBase
+}
+
+// GetPhase returns the current phase
+func (sv *SharedVolume) GetPhase() string {
+	return sv.Status.Phase
+}
+
+// SetPhase sets the current phase
+func (sv *SharedVolume) SetPhase(phase string) {
+	sv.Status.Phase = phase
+}
+
+// GetMessage returns the current message
+func (sv *SharedVolume) GetMessage() string {
+	return sv.Status.Message
+}
+
+// SetMessage sets the current message
+func (sv *SharedVolume) SetMessage(message string) {
+	sv.Status.Message = message
+}
+
+// GetNfsServerAddress returns the NFS server address
+func (sv *SharedVolume) GetNfsServerAddress() string {
+	return sv.Status.NfsServerAddress
+}
+
+// SetNfsServerAddress sets the NFS server address
+func (sv *SharedVolume) SetNfsServerAddress(address string) {
+	sv.Status.NfsServerAddress = address
+}
+
+// GetPersistentVolumeClaimName returns the PVC name
+func (sv *SharedVolume) GetPersistentVolumeClaimName() string {
+	return sv.Status.PersistentVolumeClaimName
+}
+
+// SetPersistentVolumeClaimName sets the PVC name
+func (sv *SharedVolume) SetPersistentVolumeClaimName(name string) {
+	sv.Status.PersistentVolumeClaimName = name
+}
+
+// GetPersistentVolumeName returns the PV name
+func (sv *SharedVolume) GetPersistentVolumeName() string {
+	return sv.Status.PersistentVolumeName
+}
+
+// SetPersistentVolumeName sets the PV name
+func (sv *SharedVolume) SetPersistentVolumeName(name string) {
+	sv.Status.PersistentVolumeName = name
+}
+
+// GetServiceName returns the service name
+func (sv *SharedVolume) GetServiceName() string {
+	return sv.Status.ServiceName
+}
+
+// SetServiceName sets the service name
+func (sv *SharedVolume) SetServiceName(name string) {
+	sv.Status.ServiceName = name
+}

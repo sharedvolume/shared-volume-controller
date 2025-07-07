@@ -83,6 +83,7 @@ rules:
 - apiGroups:
   - sv.sharedvolume.io
   resources:
+  - clustersharedvolumes
   - sharedvolumes
   verbs:
   - create
@@ -95,12 +96,14 @@ rules:
 - apiGroups:
   - sv.sharedvolume.io
   resources:
+  - clustersharedvolumes/finalizers
   - sharedvolumes/finalizers
   verbs:
   - update
 - apiGroups:
   - sv.sharedvolume.io
   resources:
+  - clustersharedvolumes/status
   - sharedvolumes/status
   verbs:
   - get

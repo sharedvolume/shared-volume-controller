@@ -34,11 +34,49 @@ import (
 	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	nfsv1alpha1 "github.com/sharedvolume/nfs-server-controller/api/v1alpha1"
 	svv1alpha1 "github.com/sharedvolume/shared-volume-controller/api/v1alpha1"
 )
+
+const (
+	// NfsServerGeneratingAnnotation marks when NfsServer generation is in progress
+	NfsServerGeneratingAnnotation = "shared-volume.io/nfsserver-generating"
+)
+
+// VolumeObject represents a common interface for volume-like objects
+type VolumeObject interface {
+	client.Object
+	// GetVolumeSpec returns the common volume specification
+	GetVolumeSpec() *svv1alpha1.VolumeSpecBase
+	// GetPhase returns the current phase
+	GetPhase() string
+	// SetPhase sets the current phase
+	SetPhase(phase string)
+	// GetMessage returns the current message
+	GetMessage() string
+	// SetMessage sets the current message
+	SetMessage(message string)
+	// GetNfsServerAddress returns the NFS server address
+	GetNfsServerAddress() string
+	// SetNfsServerAddress sets the NFS server address
+	SetNfsServerAddress(address string)
+	// GetPersistentVolumeClaimName returns the PVC name
+	GetPersistentVolumeClaimName() string
+	// SetPersistentVolumeClaimName sets the PVC name
+	SetPersistentVolumeClaimName(name string)
+	// GetPersistentVolumeName returns the PV name
+	GetPersistentVolumeName() string
+	// SetPersistentVolumeName sets the PV name
+	SetPersistentVolumeName(name string)
+	// GetServiceName returns the service name
+	GetServiceName() string
+	// SetServiceName sets the service name
+	SetServiceName(name string)
+}
 
 // VolumeControllerBase contains the shared implementation for volume controllers
 type VolumeControllerBase struct {
@@ -60,76 +98,99 @@ func NewVolumeControllerBase(client client.Client, scheme *runtime.Scheme, contr
 	}
 }
 
-// FillAndValidateSpec fills defaults and validates the SharedVolume spec.
-func (r *VolumeControllerBase) FillAndValidateSpec(sharedVolume *svv1alpha1.SharedVolume, generateNfsServer bool) error {
-	if sharedVolume.Spec.ResourceNamespace == "" {
-		sharedVolume.Spec.ResourceNamespace = sharedVolume.Namespace
+// FillAndValidateSpec fills defaults and validates the volume spec.
+func (r *VolumeControllerBase) FillAndValidateSpec(volumeObj VolumeObject, generateNfsServer bool, namespace string) error {
+	spec := volumeObj.GetVolumeSpec()
+	if spec.ResourceNamespace == "" {
+		spec.ResourceNamespace = namespace
 	}
-	if sharedVolume.Spec.MountPath == "" {
-		return errors.New("mountPath is required in SharedVolume spec")
+	if spec.MountPath == "" {
+		return errors.New("mountPath is required in volume spec")
 	}
-	if sharedVolume.Spec.SyncInterval == "" {
-		sharedVolume.Spec.SyncInterval = "60s"
+	if spec.SyncInterval == "" {
+		spec.SyncInterval = "60s"
 	}
-	if sharedVolume.Spec.SyncTimeout == "" {
-		sharedVolume.Spec.SyncTimeout = "120s"
+	if spec.SyncTimeout == "" {
+		spec.SyncTimeout = "120s"
 	}
-	if sharedVolume.Spec.Storage == nil {
-		return errors.New("storage is required in SharedVolume spec")
+	if spec.Storage == nil {
+		return errors.New("storage is required in volume spec")
 	}
-	if sharedVolume.Spec.Storage.Capacity == "" {
-		return errors.New("storage.capacity is required in SharedVolume spec")
+	if spec.Storage.Capacity == "" {
+		return errors.New("storage.capacity is required in volume spec")
 	}
-	if sharedVolume.Spec.Storage.AccessMode == "" {
-		sharedVolume.Spec.Storage.AccessMode = "ReadOnly"
-	} else if sharedVolume.Spec.Storage.AccessMode != "ReadWrite" && sharedVolume.Spec.Storage.AccessMode != "ReadOnly" {
-		return errors.New("storage.accessMode must be either ReadWrite or ReadOnly in SharedVolume spec")
+	if spec.Storage.AccessMode == "" {
+		spec.Storage.AccessMode = "ReadOnly"
+	} else if spec.Storage.AccessMode != "ReadWrite" && spec.Storage.AccessMode != "ReadOnly" {
+		return errors.New("storage.accessMode must be either ReadWrite or ReadOnly in volume spec")
 	}
-	if generateNfsServer && sharedVolume.Spec.StorageClassName == "" {
+	if generateNfsServer && spec.StorageClassName == "" {
 		return errors.New("storageClassName is required if nfsServer is not defined")
 	}
 	// Ensure NfsServer has a Path if it's defined, defaulting to "/"
 	// The actual NfsServer and PV will use this exact path for the share
-	if !generateNfsServer && sharedVolume.Spec.NfsServer != nil {
-		if sharedVolume.Spec.NfsServer.Path == "" {
-			sharedVolume.Spec.NfsServer.Path = "/"
+	if !generateNfsServer && spec.NfsServer != nil {
+		if spec.NfsServer.Path == "" {
+			spec.NfsServer.Path = "/"
 		}
 	}
 	return nil
 }
 
 // CreateAndOwnNfsServer creates an NfsServer resource and sets ownership
-func (r *VolumeControllerBase) CreateAndOwnNfsServer(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) error {
+func (r *VolumeControllerBase) CreateAndOwnNfsServer(ctx context.Context, volumeObj VolumeObject, namespace string) error {
+	log := logf.FromContext(ctx)
+	spec := volumeObj.GetVolumeSpec()
+
+	// Check if NfsServer already exists to prevent duplicates
+	existingNfsServer := &nfsv1alpha1.NfsServer{}
+	err := r.Client.Get(ctx, client.ObjectKey{
+		Name:      spec.NfsServer.Name,
+		Namespace: namespace,
+	}, existingNfsServer)
+
+	if err == nil {
+		log.Info("NfsServer already exists, skipping creation", "name", spec.NfsServer.Name)
+		return nil
+	}
+
+	if !apierrors.IsNotFound(err) {
+		log.Error(err, "Failed to check if NfsServer exists")
+		return err
+	}
+
 	// Use the path from the spec for NfsServer path
 	// We'll use spec.NfsServer.Path for the actual share path as requested
 
 	nfsServer := &nfsv1alpha1.NfsServer{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sharedVolume.Spec.NfsServer.Name,
-			Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+			Name:      spec.NfsServer.Name,
+			Namespace: namespace, // Use passed namespace parameter
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "shared-volume-controller",
-				"shared-volume.io/reference":   sharedVolume.Spec.ReferenceValue,
-				"shared-volume.io/owner":       fmt.Sprintf("%s.%s", sharedVolume.Name, sharedVolume.Namespace),
+				"shared-volume.io/reference":   spec.ReferenceValue,
+				"shared-volume.io/owner":       fmt.Sprintf("%s.%s", volumeObj.GetName(), namespace),
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
-					APIVersion: sharedVolume.APIVersion,
-					Kind:       sharedVolume.Kind,
-					Name:       sharedVolume.Name,
-					UID:        sharedVolume.UID,
+					APIVersion: volumeObj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
+					Kind:       volumeObj.GetObjectKind().GroupVersionKind().Kind,
+					Name:       volumeObj.GetName(),
+					UID:        volumeObj.GetUID(),
 					Controller: pointer.Bool(false),
 				},
 			},
 		},
 		Spec: nfsv1alpha1.NfsServerSpec{
 			Storage: nfsv1alpha1.StorageSpec{
-				Capacity:         sharedVolume.Spec.Storage.Capacity,
-				StorageClassName: sharedVolume.Spec.StorageClassName,
+				Capacity:         spec.Storage.Capacity,
+				StorageClassName: spec.StorageClassName,
 			},
-			Image: sharedVolume.Spec.NfsServer.Image,
+			Image: spec.NfsServer.Image,
 		},
 	}
+
+	log.Info("Creating NfsServer", "name", nfsServer.Name, "namespace", nfsServer.Namespace)
 	return r.Client.Create(ctx, nfsServer)
 }
 
@@ -142,6 +203,43 @@ func (r *VolumeControllerBase) RandString(n int) string {
 		b[i] = letters[rand.Intn(len(letters))]
 	}
 	return string(b)
+}
+
+// GenerateAndCreateNfsServer creates an NFS server for the VolumeObject with default configuration
+func (r *VolumeControllerBase) GenerateAndCreateNfsServer(ctx context.Context, volumeObj VolumeObject, resourcePrefix string, namespace string) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	spec := volumeObj.GetVolumeSpec()
+
+	// Generate reference value if not set
+	if spec.ReferenceValue == "" {
+		spec.ReferenceValue = resourcePrefix + "-" + r.RandString(12)
+	}
+
+	// Generate NFS server configuration
+	nfsServerName := "nfs-" + spec.ReferenceValue
+	spec.NfsServer = &svv1alpha1.NfsServerSpec{
+		Name:      nfsServerName,
+		Namespace: namespace,
+		URL:       nfsServerName + "." + namespace + ".svc.cluster.local",
+		Path:      "/", // Default path, will be used as the actual share path
+	}
+
+	log.Info("Generating NfsServer", "name", nfsServerName, "referenceValue", spec.ReferenceValue)
+
+	// Update the VolumeObject with the generated NFS server spec and reference value
+	if err := r.Update(ctx, volumeObj); err != nil {
+		log.Error(err, "Failed to update VolumeObject with generated NFS server spec")
+		return ctrl.Result{}, err
+	}
+
+	// Create the NFS server
+	if err := r.CreateAndOwnNfsServer(ctx, volumeObj, namespace); err != nil {
+		log.Error(err, "Failed to create NFS server")
+		return ctrl.Result{}, err
+	}
+
+	// Requeue to allow the NFS server to be created and become ready
+	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 }
 
 // EnsureControllerNamespace ensures that the controller namespace exists
@@ -175,82 +273,32 @@ func (r *VolumeControllerBase) EnsureControllerNamespace(ctx context.Context) er
 }
 
 // ReconcileNfsServer handles the NfsServer lifecycle management
-func (r *VolumeControllerBase) ReconcileNfsServer(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, generateNfsServer bool) (ctrl.Result, error) {
-	// If we need to generate an NfsServer
+func (r *VolumeControllerBase) ReconcileNfsServer(ctx context.Context, volumeObj VolumeObject, generateNfsServer bool, namespace string) (ctrl.Result, error) {
+	// If we need to generate an NfsServer, this should be handled by the specific controller
 	if generateNfsServer {
-		return r.GenerateAndCreateNfsServer(ctx, sharedVolume)
+		return ctrl.Result{}, fmt.Errorf("NFS server generation should be handled by the specific volume controller")
 	}
 
 	// Check if NfsServer exists and is ready
-	if sharedVolume.Spec.NfsServer != nil && sharedVolume.Spec.NfsServer.Name != "" {
-		return r.CheckAndUpdateNfsServerStatus(ctx, sharedVolume)
+	spec := volumeObj.GetVolumeSpec()
+	if spec.NfsServer != nil && spec.NfsServer.Name != "" {
+		return r.CheckAndUpdateNfsServerStatus(ctx, volumeObj, namespace)
 	}
 
 	return ctrl.Result{}, nil
 }
 
-// GenerateAndCreateNfsServer generates and creates an NfsServer resource from the SharedVolume.
-func (r *VolumeControllerBase) GenerateAndCreateNfsServer(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) (ctrl.Result, error) {
+// CheckAndUpdateNfsServerStatus checks NfsServer status and updates volume status accordingly
+func (r *VolumeControllerBase) CheckAndUpdateNfsServerStatus(ctx context.Context, volumeObj VolumeObject, namespace string) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Get the latest version of the object before updating
-	var latestSharedVolume svv1alpha1.SharedVolume
-	if err := r.Get(ctx, client.ObjectKeyFromObject(sharedVolume), &latestSharedVolume); err != nil {
-		log.Error(err, "Failed to get latest SharedVolume before update")
-		return ctrl.Result{}, err
-	}
-
-	// If someone else has already set the NfsServer, use that one instead
-	if latestSharedVolume.Spec.NfsServer != nil {
-		log.Info("NfsServer was already set", "name", latestSharedVolume.Spec.NfsServer.Name)
-		*sharedVolume = latestSharedVolume
-		return r.CheckAndUpdateNfsServerStatus(ctx, sharedVolume)
-	}
-
-	// Generate reference value for all related resources
-	referenceValue := "sv-" + r.RandString(12)
-	latestSharedVolume.Spec.ReferenceValue = referenceValue
-
-	// Generate NfsServer spec
-	nfsServerName := "nfs-" + referenceValue
-	latestSharedVolume.Spec.NfsServer = &svv1alpha1.NfsServerSpec{
-		Name:      nfsServerName,
-		Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace instead of ControllerNamespace
-		URL:       nfsServerName + "." + sharedVolume.Namespace + ".svc.cluster.local",
-		Path:      "/", // Default path, will be used as the actual share path
-	}
-	log.Info("Generating NfsServer", "name", nfsServerName)
-
-	// Update with the new NfsServer spec
-	if err := r.Update(ctx, &latestSharedVolume); err != nil {
-		log.Error(err, "Failed to update SharedVolume with NfsServer spec")
-		return ctrl.Result{}, err
-	}
-
-	// Update our reference with the latest version
-	*sharedVolume = latestSharedVolume
-
-	// Create the NfsServer resource
-	if err := r.CreateAndOwnNfsServer(ctx, sharedVolume); err != nil {
-		log.Error(err, "Failed to create NfsServer")
-		return ctrl.Result{}, err
-	}
-
-	// Requeue to pick up the updated spec and avoid duplicate NfsServer creation
-	return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-}
-
-// CheckAndUpdateNfsServerStatus checks NfsServer status and updates SharedVolume status accordingly
-func (r *VolumeControllerBase) CheckAndUpdateNfsServerStatus(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
-	ready, phase, message, err := r.CheckNfsServerStatus(ctx, sharedVolume)
+	ready, phase, message, err := r.CheckNfsServerStatus(ctx, volumeObj, namespace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Update the status fields
-	statusChanged := r.UpdateSharedVolumeStatus(sharedVolume, ready, phase, message)
+	statusChanged := r.UpdateVolumeStatus(volumeObj, ready, phase, message)
 
 	// Update status if changed (this will be handled by the calling controller for now)
 	if statusChanged {
@@ -268,20 +316,20 @@ func (r *VolumeControllerBase) CheckAndUpdateNfsServerStatus(ctx context.Context
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	// NfsServer is ready, return success for now
-	// Resource reconciliation and readiness checking will be handled by the calling controller
+	// NfsServer is ready, proceeding to resource reconciliation
 	log.Info("NfsServer is ready, proceeding to resource reconciliation")
 	return ctrl.Result{}, nil
 }
 
 // CheckNfsServerStatus checks if the NfsServer exists and is ready
-func (r *VolumeControllerBase) CheckNfsServerStatus(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) (bool, string, string, error) {
+func (r *VolumeControllerBase) CheckNfsServerStatus(ctx context.Context, volumeObj VolumeObject, namespace string) (bool, string, string, error) {
 	log := logf.FromContext(ctx)
+	spec := volumeObj.GetVolumeSpec()
 
 	nfsServer := &nfsv1alpha1.NfsServer{}
 	err := r.Get(ctx, client.ObjectKey{
-		Name:      sharedVolume.Spec.NfsServer.Name,
-		Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+		Name:      spec.NfsServer.Name,
+		Namespace: namespace,
 	}, nfsServer)
 
 	if client.IgnoreNotFound(err) != nil {
@@ -292,15 +340,15 @@ func (r *VolumeControllerBase) CheckNfsServerStatus(ctx context.Context, sharedV
 	if err != nil { // Not found
 		message := "NfsServer not found, waiting for creation"
 		log.Info(message,
-			"name", sharedVolume.Spec.NfsServer.Name,
-			"namespace", sharedVolume.Namespace)
+			"name", spec.NfsServer.Name,
+			"namespace", namespace)
 		return false, "Pending", message, nil
 	}
 
 	if !nfsServer.Status.Ready {
 		message := "NfsServer exists but is not ready yet"
 		log.Info(message,
-			"name", sharedVolume.Spec.NfsServer.Name,
+			"name", spec.NfsServer.Name,
 			"status", nfsServer.Status.Phase)
 		return false, "Pending", message, nil
 	}
@@ -309,25 +357,26 @@ func (r *VolumeControllerBase) CheckNfsServerStatus(ctx context.Context, sharedV
 	return true, "", "NfsServer is ready", nil
 }
 
-// UpdateSharedVolumeStatus updates the status fields and returns true if any field was changed
-func (r *VolumeControllerBase) UpdateSharedVolumeStatus(sharedVolume *svv1alpha1.SharedVolume, nfsReady bool, phase string, message string) bool {
+// UpdateVolumeStatus updates the status fields and returns true if any field was changed
+func (r *VolumeControllerBase) UpdateVolumeStatus(volumeObj VolumeObject, nfsReady bool, phase string, message string) bool {
 	statusChanged := false
 
 	// Update phase if changed and phase is not empty (empty phase means don't update)
-	if phase != "" && sharedVolume.Status.Phase != phase {
-		sharedVolume.Status.Phase = phase
+	if phase != "" && volumeObj.GetPhase() != phase {
+		volumeObj.SetPhase(phase)
 		statusChanged = true
 	}
 
 	// Update message if changed
-	if sharedVolume.Status.Message != message {
-		sharedVolume.Status.Message = message
+	if volumeObj.GetMessage() != message {
+		volumeObj.SetMessage(message)
 		statusChanged = true
 	}
 
 	// Set NFS server address if available and not already set
-	if nfsReady && sharedVolume.Status.NfsServerAddress == "" && sharedVolume.Spec.NfsServer != nil && sharedVolume.Spec.NfsServer.URL != "" {
-		sharedVolume.Status.NfsServerAddress = sharedVolume.Spec.NfsServer.URL
+	spec := volumeObj.GetVolumeSpec()
+	if nfsReady && volumeObj.GetNfsServerAddress() == "" && spec.NfsServer != nil && spec.NfsServer.URL != "" {
+		volumeObj.SetNfsServerAddress(spec.NfsServer.URL)
 		statusChanged = true
 	}
 
@@ -337,36 +386,150 @@ func (r *VolumeControllerBase) UpdateSharedVolumeStatus(sharedVolume *svv1alpha1
 	return statusChanged
 }
 
-// ReconcileRequiredResources creates or updates the PV, PVC, ReplicaSet, and Service resources
-func (r *VolumeControllerBase) ReconcileRequiredResources(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) error {
+// UpdateVolumeStatusSimple updates basic status fields (phase and message) and returns true if any field was changed
+func (r *VolumeControllerBase) UpdateVolumeStatusSimple(volumeObj VolumeObject, phase string, message string) bool {
+	statusChanged := false
+
+	// Update phase if changed
+	if volumeObj.GetPhase() != phase {
+		volumeObj.SetPhase(phase)
+		statusChanged = true
+	}
+
+	// Update message if changed
+	if volumeObj.GetMessage() != message {
+		volumeObj.SetMessage(message)
+		statusChanged = true
+	}
+
+	return statusChanged
+}
+
+// RemoveFinalizerWithRetry removes a finalizer from any client.Object with retry and conflict handling
+func (r *VolumeControllerBase) RemoveFinalizerWithRetry(ctx context.Context, obj client.Object, finalizerName string) error {
 	log := logf.FromContext(ctx)
 
-	// If referenceValue is not set, generate one
-	if sharedVolume.Spec.ReferenceValue == "" {
-		sharedVolume.Spec.ReferenceValue = "sv-" + r.RandString(12)
-		if err := r.Update(ctx, sharedVolume); err != nil {
-			log.Error(err, "Failed to update SharedVolume with referenceValue")
+	// Maximum number of retries
+	maxRetries := 3
+	retryCount := 0
+
+	for {
+		// Get the latest version of the object before updating to prevent conflicts
+		latestObj := obj.DeepCopyObject().(client.Object)
+		if err := r.Get(ctx, client.ObjectKeyFromObject(obj), latestObj); err != nil {
+			if apierrors.IsNotFound(err) {
+				// Object already deleted, nothing to do
+				log.Info("Object already deleted, no need to remove finalizer", "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
+				return nil
+			}
+			log.Error(err, "Failed to get latest object before finalizer removal", "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
 			return err
 		}
+
+		// Check if the finalizer is still present
+		if !ContainsString(latestObj.GetFinalizers(), finalizerName) {
+			log.Info("Finalizer already removed", "finalizer", finalizerName, "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
+			// Update the original object reference with the latest version
+			obj.SetResourceVersion(latestObj.GetResourceVersion())
+			obj.SetFinalizers(latestObj.GetFinalizers())
+			return nil
+		}
+
+		// Remove the finalizer from the latest version
+		finalizers := RemoveString(latestObj.GetFinalizers(), finalizerName)
+		latestObj.SetFinalizers(finalizers)
+
+		// Update the object
+		if err := r.Update(ctx, latestObj); err != nil {
+			if apierrors.IsConflict(err) && retryCount < maxRetries {
+				retryCount++
+				log.Info("Conflict detected while removing finalizer, retrying", "retryCount", retryCount, "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
+				time.Sleep(time.Millisecond * 100 * time.Duration(retryCount)) // Backoff with each retry
+				continue
+			}
+			if apierrors.IsNotFound(err) {
+				// Object was deleted during our retry, which is fine
+				log.Info("Object was deleted during finalizer removal", "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
+				return nil
+			}
+			log.Error(err, "Failed to remove finalizer after retries", "finalizer", finalizerName, "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
+			return err
+		}
+
+		// Success - update our reference with the latest version
+		obj.SetResourceVersion(latestObj.GetResourceVersion())
+		obj.SetFinalizers(latestObj.GetFinalizers())
+		log.Info("Successfully removed finalizer", "finalizer", finalizerName, "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
+		return nil
+	}
+}
+
+// UpdateStatusWithRetry updates the status of any client.Object with retry and conflict handling
+func (r *VolumeControllerBase) UpdateStatusWithRetry(ctx context.Context, obj client.Object, updateFn func(client.Object)) error {
+	log := logf.FromContext(ctx)
+
+	// Maximum number of retries
+	maxRetries := 3
+	retryCount := 0
+
+	for {
+		// Get the latest version of the object before updating to prevent conflicts
+		latestObj := obj.DeepCopyObject().(client.Object)
+		if err := r.Get(ctx, client.ObjectKeyFromObject(obj), latestObj); err != nil {
+			log.Error(err, "Failed to get latest object before status update", "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
+			return err
+		}
+
+		// Apply the status update function to the latest object
+		updateFn(latestObj)
+
+		// Update the status on the latest version of the object
+		if err := r.Status().Update(ctx, latestObj); err != nil {
+			if apierrors.IsConflict(err) && retryCount < maxRetries {
+				retryCount++
+				log.Info("Conflict detected while updating status, retrying", "retryCount", retryCount, "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
+				time.Sleep(time.Millisecond * 100 * time.Duration(retryCount)) // Backoff with each retry
+				continue
+			}
+			log.Error(err, "Failed to update object status after retries", "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
+			return err
+		}
+
+		// Success - update our reference with the latest version
+		obj.SetResourceVersion(latestObj.GetResourceVersion())
+		// Note: We don't copy the entire object here as the caller may need to preserve other changes
+		// The caller should handle copying any needed fields from latestObj if required
+		log.V(1).Info("Successfully updated object status", "kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", obj.GetName())
+		return nil
+	}
+}
+
+// ReconcileRequiredResources creates or updates the PV, PVC, ReplicaSet, and Service resources
+func (r *VolumeControllerBase) ReconcileRequiredResources(ctx context.Context, volumeObj VolumeObject, namespace string) error {
+	spec := volumeObj.GetVolumeSpec()
+
+	// If referenceValue is not set, return an error - this should be handled by the specific controller
+	if spec.ReferenceValue == "" {
+		return fmt.Errorf("referenceValue must be set before calling ReconcileRequiredResources")
 	}
 
 	// Create PV
-	if err := r.ReconcilePersistentVolume(ctx, sharedVolume); err != nil {
+	if err := r.ReconcilePersistentVolume(ctx, volumeObj, namespace); err != nil {
 		return err
 	}
 
 	// Create PVC
-	if err := r.ReconcilePersistentVolumeClaim(ctx, sharedVolume); err != nil {
+	if err := r.ReconcilePersistentVolumeClaim(ctx, volumeObj, namespace); err != nil {
 		return err
 	}
 
 	// Create ReplicaSet
-	if err := r.ReconcileReplicaSet(ctx, sharedVolume); err != nil {
+	if err := r.ReconcileReplicaSet(ctx, volumeObj, namespace); err != nil {
 		return err
 	}
 
 	// Create Service
-	if err := r.ReconcileService(ctx, sharedVolume); err != nil {
+	if err := r.ReconcileService(ctx, volumeObj, namespace); err != nil {
 		return err
 	}
 
@@ -374,18 +537,19 @@ func (r *VolumeControllerBase) ReconcileRequiredResources(ctx context.Context, s
 }
 
 // ReconcilePersistentVolume creates or updates the PersistentVolume
-func (r *VolumeControllerBase) ReconcilePersistentVolume(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) error {
+func (r *VolumeControllerBase) ReconcilePersistentVolume(ctx context.Context, volumeObj VolumeObject, namespace string) error {
 	log := logf.FromContext(ctx)
+	spec := volumeObj.GetVolumeSpec()
 
 	// Define PV name
-	pvName := fmt.Sprintf("pv-%s", sharedVolume.Spec.ReferenceValue)
+	pvName := fmt.Sprintf("pv-%s", spec.ReferenceValue)
 
 	// Check if PV already exists
 	existingPV := &corev1.PersistentVolume{}
 	err := r.Get(ctx, client.ObjectKey{Name: pvName}, existingPV)
 	if err == nil {
 		// PV already exists, update status if needed
-		if sharedVolume.Status.PersistentVolumeName != pvName {
+		if volumeObj.GetPersistentVolumeName() != pvName {
 			// Status update will be handled by the calling controller
 			log.Info("PV already exists", "name", pvName)
 		}
@@ -393,16 +557,16 @@ func (r *VolumeControllerBase) ReconcilePersistentVolume(ctx context.Context, sh
 	}
 
 	// Get storage capacity as a resource quantity
-	storageQuantity, err := resource.ParseQuantity(sharedVolume.Spec.Storage.Capacity)
+	storageQuantity, err := resource.ParseQuantity(spec.Storage.Capacity)
 	if err != nil {
-		log.Error(err, "Failed to parse storage capacity", "capacity", sharedVolume.Spec.Storage.Capacity)
+		log.Error(err, "Failed to parse storage capacity", "capacity", spec.Storage.Capacity)
 		return err
 	}
 
 	err = r.Get(ctx, client.ObjectKey{Name: pvName}, existingPV)
 	if err == nil {
 		// PV already exists, update status if needed
-		if sharedVolume.Status.PersistentVolumeName != pvName {
+		if volumeObj.GetPersistentVolumeName() != pvName {
 			// Status update will be handled by the calling controller
 			log.Info("PV already exists", "name", pvName)
 		}
@@ -412,15 +576,15 @@ func (r *VolumeControllerBase) ReconcilePersistentVolume(ctx context.Context, sh
 	// Define the PV
 	// Use the path from the spec for the share
 	// This needs to match the actual path used in the NFS server
-	nfsSharePath := sharedVolume.Spec.NfsServer.Path
+	nfsSharePath := spec.NfsServer.Path
 
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: pvName,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "shared-volume-controller",
-				"shared-volume.io/reference":   sharedVolume.Spec.ReferenceValue,
-				"shared-volume.io/owner":       fmt.Sprintf("%s.%s", sharedVolume.Name, sharedVolume.Namespace),
+				"shared-volume.io/reference":   spec.ReferenceValue,
+				"shared-volume.io/owner":       fmt.Sprintf("%s.%s", volumeObj.GetName(), namespace),
 			},
 			Annotations: map[string]string{
 				"pv.kubernetes.io/provisioned-by": "nfs.csi.k8s.io",
@@ -442,10 +606,10 @@ func (r *VolumeControllerBase) ReconcilePersistentVolume(ctx context.Context, sh
 				CSI: &corev1.CSIPersistentVolumeSource{
 					Driver: "nfs.csi.k8s.io",
 					VolumeHandle: fmt.Sprintf("%s%s##",
-						sharedVolume.Spec.NfsServer.URL,
+						spec.NfsServer.URL,
 						nfsSharePath),
 					VolumeAttributes: map[string]string{
-						"server": sharedVolume.Spec.NfsServer.URL,
+						"server": spec.NfsServer.URL,
 						"share":  nfsSharePath,
 					},
 				},
@@ -464,23 +628,24 @@ func (r *VolumeControllerBase) ReconcilePersistentVolume(ctx context.Context, sh
 }
 
 // ReconcilePersistentVolumeClaim creates or updates the PersistentVolumeClaim
-func (r *VolumeControllerBase) ReconcilePersistentVolumeClaim(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) error {
+func (r *VolumeControllerBase) ReconcilePersistentVolumeClaim(ctx context.Context, volumeObj VolumeObject, namespace string) error {
 	log := logf.FromContext(ctx)
+	spec := volumeObj.GetVolumeSpec()
 
 	// Define PVC name
-	pvcName := sharedVolume.Spec.ReferenceValue
-	pvName := fmt.Sprintf("pv-%s", sharedVolume.Spec.ReferenceValue)
+	pvcName := spec.ReferenceValue
+	pvName := fmt.Sprintf("pv-%s", spec.ReferenceValue)
 
 	// Check if PVC already exists
 	existingPVC := &corev1.PersistentVolumeClaim{}
 	err := r.Get(ctx, client.ObjectKey{
 		Name:      pvcName,
-		Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+		Namespace: namespace,
 	}, existingPVC)
 
 	if err == nil {
 		// PVC already exists, update status if needed
-		if sharedVolume.Status.PersistentVolumeClaimName != pvcName {
+		if volumeObj.GetPersistentVolumeClaimName() != pvcName {
 			// Status update will be handled by the calling controller
 			log.Info("PVC already exists", "name", pvcName)
 		}
@@ -488,9 +653,9 @@ func (r *VolumeControllerBase) ReconcilePersistentVolumeClaim(ctx context.Contex
 	}
 
 	// Get storage capacity as a resource quantity
-	storageQuantity, err := resource.ParseQuantity(sharedVolume.Spec.Storage.Capacity)
+	storageQuantity, err := resource.ParseQuantity(spec.Storage.Capacity)
 	if err != nil {
-		log.Error(err, "Failed to parse storage capacity", "capacity", sharedVolume.Spec.Storage.Capacity)
+		log.Error(err, "Failed to parse storage capacity", "capacity", spec.Storage.Capacity)
 		return err
 	}
 
@@ -498,18 +663,18 @@ func (r *VolumeControllerBase) ReconcilePersistentVolumeClaim(ctx context.Contex
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      pvcName,
-			Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+			Namespace: namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "shared-volume-controller",
-				"shared-volume.io/reference":   sharedVolume.Spec.ReferenceValue,
-				"shared-volume.io/owner":       fmt.Sprintf("%s.%s", sharedVolume.Name, sharedVolume.Namespace),
+				"shared-volume.io/reference":   spec.ReferenceValue,
+				"shared-volume.io/owner":       fmt.Sprintf("%s.%s", volumeObj.GetName(), namespace),
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
-					APIVersion: sharedVolume.APIVersion,
-					Kind:       sharedVolume.Kind,
-					Name:       sharedVolume.Name,
-					UID:        sharedVolume.UID,
+					APIVersion: volumeObj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
+					Kind:       volumeObj.GetObjectKind().GroupVersionKind().Kind,
+					Name:       volumeObj.GetName(),
+					UID:        volumeObj.GetUID(),
 					Controller: pointer.Bool(false),
 				},
 			},
@@ -539,18 +704,19 @@ func (r *VolumeControllerBase) ReconcilePersistentVolumeClaim(ctx context.Contex
 }
 
 // ReconcileReplicaSet creates or updates the ReplicaSet
-func (r *VolumeControllerBase) ReconcileReplicaSet(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) error {
+func (r *VolumeControllerBase) ReconcileReplicaSet(ctx context.Context, volumeObj VolumeObject, namespace string) error {
 	log := logf.FromContext(ctx)
+	spec := volumeObj.GetVolumeSpec()
 
 	// Define ReplicaSet name
-	replicaSetName := sharedVolume.Spec.ReferenceValue
-	pvcName := sharedVolume.Spec.ReferenceValue
+	replicaSetName := spec.ReferenceValue
+	pvcName := spec.ReferenceValue
 
 	// Check if ReplicaSet already exists
 	existingRS := &appsv1.ReplicaSet{}
 	err := r.Get(ctx, client.ObjectKey{
 		Name:      replicaSetName,
-		Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+		Namespace: namespace,
 	}, existingRS)
 
 	if err == nil {
@@ -590,19 +756,19 @@ func (r *VolumeControllerBase) ReconcileReplicaSet(ctx context.Context, sharedVo
 	rs := &appsv1.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      replicaSetName,
-			Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+			Namespace: namespace,
 			Labels: map[string]string{
 				"app":                          replicaSetName,
 				"app.kubernetes.io/managed-by": "shared-volume-controller",
-				"shared-volume.io/reference":   sharedVolume.Spec.ReferenceValue,
-				"shared-volume.io/owner":       fmt.Sprintf("%s.%s", sharedVolume.Name, sharedVolume.Namespace),
+				"shared-volume.io/reference":   spec.ReferenceValue,
+				"shared-volume.io/owner":       fmt.Sprintf("%s.%s", volumeObj.GetName(), namespace),
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
-					APIVersion: sharedVolume.APIVersion,
-					Kind:       sharedVolume.Kind,
-					Name:       sharedVolume.Name,
-					UID:        sharedVolume.UID,
+					APIVersion: volumeObj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
+					Kind:       volumeObj.GetObjectKind().GroupVersionKind().Kind,
+					Name:       volumeObj.GetName(),
+					UID:        volumeObj.GetUID(),
 					Controller: pointer.Bool(false),
 				},
 			},
@@ -627,11 +793,10 @@ func (r *VolumeControllerBase) ReconcileReplicaSet(ctx context.Context, sharedVo
 							Image: "sharedvolume/volume-syncer:0.0.2",
 							Command: []string{
 								"sh",
-								"-c",
-								fmt.Sprintf("mkdir -p /nfs/%s-%s && echo 'sv-sample-file' > /nfs/%s-%s/.sv && echo 'Created folder /nfs/%s-%s with .sv file'",
-									sharedVolume.Name, sharedVolume.Namespace,
-									sharedVolume.Name, sharedVolume.Namespace,
-									sharedVolume.Name, sharedVolume.Namespace),
+								"-c", fmt.Sprintf("mkdir -p /nfs/%s-%s && echo 'sv-sample-file' > /nfs/%s-%s/.sv && echo 'Created folder /nfs/%s-%s with .sv file'",
+									volumeObj.GetName(), namespace,
+									volumeObj.GetName(), namespace,
+									volumeObj.GetName(), namespace),
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
@@ -643,7 +808,7 @@ func (r *VolumeControllerBase) ReconcileReplicaSet(ctx context.Context, sharedVo
 					},
 					Containers: []corev1.Container{
 						{
-							Name:  sharedVolume.Spec.ReferenceValue + "-syncer",
+							Name:  spec.ReferenceValue + "-syncer",
 							Image: "sharedvolume/volume-syncer:0.0.2",
 							Ports: []corev1.ContainerPort{
 								{
@@ -680,23 +845,24 @@ func (r *VolumeControllerBase) ReconcileReplicaSet(ctx context.Context, sharedVo
 		return err
 	}
 
-	log.Info("Created ReplicaSet", "name", replicaSetName, "referenceID", sharedVolume.Spec.ReferenceValue)
+	log.Info("Created ReplicaSet", "name", replicaSetName, "referenceID", spec.ReferenceValue)
 	return nil
 }
 
 // ReconcileService creates or updates the Service
-func (r *VolumeControllerBase) ReconcileService(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) error {
+func (r *VolumeControllerBase) ReconcileService(ctx context.Context, volumeObj VolumeObject, namespace string) error {
 	log := logf.FromContext(ctx)
+	spec := volumeObj.GetVolumeSpec()
 
 	// Define Service name
-	serviceName := fmt.Sprintf("%s", sharedVolume.Spec.ReferenceValue)
-	replicaSetName := sharedVolume.Spec.ReferenceValue
+	serviceName := fmt.Sprintf("%s", spec.ReferenceValue)
+	replicaSetName := spec.ReferenceValue
 
 	// Check if Service already exists
 	existingSvc := &corev1.Service{}
 	err := r.Get(ctx, client.ObjectKey{
 		Name:      serviceName,
-		Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+		Namespace: namespace,
 	}, existingSvc)
 
 	if err == nil {
@@ -734,18 +900,18 @@ func (r *VolumeControllerBase) ReconcileService(ctx context.Context, sharedVolum
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      serviceName,
-			Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+			Namespace: namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "shared-volume-controller",
-				"shared-volume.io/reference":   sharedVolume.Spec.ReferenceValue,
-				"shared-volume.io/owner":       fmt.Sprintf("%s.%s", sharedVolume.Name, sharedVolume.Namespace),
+				"shared-volume.io/reference":   spec.ReferenceValue,
+				"shared-volume.io/owner":       fmt.Sprintf("%s.%s", volumeObj.GetName(), namespace),
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
-					APIVersion: sharedVolume.APIVersion,
-					Kind:       sharedVolume.Kind,
-					Name:       sharedVolume.Name,
-					UID:        sharedVolume.UID,
+					APIVersion: volumeObj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
+					Kind:       volumeObj.GetObjectKind().GroupVersionKind().Kind,
+					Name:       volumeObj.GetName(),
+					UID:        volumeObj.GetUID(),
 					Controller: pointer.Bool(false),
 				},
 			},
@@ -777,65 +943,68 @@ func (r *VolumeControllerBase) ReconcileService(ctx context.Context, sharedVolum
 
 // Cleanup and finalizer management functions
 
-// CleanupResources removes all resources associated with a SharedVolume
-func (b *VolumeControllerBase) CleanupResources(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) error {
+// CleanupResources removes all resources associated with a volume
+func (b *VolumeControllerBase) CleanupResources(ctx context.Context, volume VolumeObject) error {
 	log := logf.FromContext(ctx)
 
-	// Stop sync operations first
-	if b.SyncController != nil {
-		b.SyncController.StopSyncForSharedVolume(sharedVolume)
-	}
+	// Stop sync operations first - this should be handled by the specific controller
+	// since sync operations are volume-type specific
+	// The specific controller should call the appropriate sync stop method
 
-	if sharedVolume.Spec.ReferenceValue == "" {
+	spec := volume.GetVolumeSpec()
+	if spec.ReferenceValue == "" {
 		return nil
 	}
 
-	referenceValue := sharedVolume.Spec.ReferenceValue
+	referenceValue := spec.ReferenceValue
 
-	log.Info("Starting comprehensive cleanup for SharedVolume", "name", sharedVolume.Name, "referenceValue", referenceValue)
+	log.Info("Starting comprehensive cleanup for volume", "name", volume.GetName(), "referenceValue", referenceValue)
 
-	// 1. Find and force delete ALL pods that use this SharedVolume (not just ReplicaSet pods)
-	b.CleanupAllPodsUsingSharedVolume(ctx, sharedVolume)
+	// 1. Find and force delete ALL pods that use this volume (not just ReplicaSet pods)
+	b.CleanupAllPodsUsingVolume(ctx, volume)
 
 	// 2. Delete ReplicaSet and any remaining pods
-	b.CleanupReplicaSet(ctx, sharedVolume, referenceValue)
+	b.CleanupReplicaSet(ctx, volume, referenceValue)
 
-	// 3. Delete Service
-	b.CleanupService(ctx, sharedVolume, referenceValue)
+	// 3. Wait for pods to be fully terminated before deleting PVCs
+	b.WaitForPodsToTerminate(ctx, volume, referenceValue)
 
-	// 4. Delete all PVCs related to this SharedVolume (both main and namespace-specific ones)
-	b.CleanupAllPVCs(ctx, sharedVolume, referenceValue)
+	// 4. Delete Service
+	b.CleanupService(ctx, volume, referenceValue)
 
-	// 5. Delete all PVs related to this SharedVolume (both main and namespace-specific ones)
-	b.CleanupAllPVs(ctx, sharedVolume, referenceValue)
+	// 5. Delete all PVCs related to this volume (both main and namespace-specific ones)
+	b.CleanupAllPVCs(ctx, volume, referenceValue)
 
-	// 6. Delete NFS Server if it was generated
-	b.CleanupNFSServer(ctx, sharedVolume)
+	// 6. Delete all PVs related to this volume (both main and namespace-specific ones)
+	b.CleanupAllPVs(ctx, volume, referenceValue)
 
-	log.Info("Completed comprehensive cleanup for SharedVolume", "name", sharedVolume.Name)
+	// 7. Delete NFS Server if it was generated
+	b.CleanupNFSServer(ctx, volume)
+
+	log.Info("Completed comprehensive cleanup for volume", "name", volume.GetName())
 	return nil
 }
 
-// CleanupAllPodsUsingSharedVolume finds and force deletes all pods that use this SharedVolume
-func (b *VolumeControllerBase) CleanupAllPodsUsingSharedVolume(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) {
+// CleanupAllPodsUsingVolume finds and force deletes all pods that use this volume
+func (b *VolumeControllerBase) CleanupAllPodsUsingVolume(ctx context.Context, volume VolumeObject) {
 	log := logf.FromContext(ctx)
 
-	// Search across all namespaces for pods using this SharedVolume
+	// Search across all namespaces for pods using this volume
 	podList := &corev1.PodList{}
 	if err := b.List(ctx, podList); err != nil {
-		log.Error(err, "Failed to list pods for SharedVolume cleanup")
+		log.Error(err, "Failed to list pods for volume cleanup")
 		return
 	}
 
-	sharedVolumeName := sharedVolume.Name
-	sharedVolumeNamespace := sharedVolume.Namespace
+	volumeName := volume.GetName()
+	volumeNamespace := volume.GetNamespace()
 
 	for _, pod := range podList.Items {
-		// Check if pod has SharedVolume annotations
+		// Check if pod has volume annotations
 		if pod.Annotations != nil {
 			for key, value := range pod.Annotations {
 				if strings.HasPrefix(key, "sharedvolume.sv/") && value == "true" {
-					// Extract the SharedVolume reference from the annotation key
+					// Extract the volume reference from the annotation key
 					refPart := strings.TrimPrefix(key, "sharedvolume.sv/")
 
 					var namespace, name string
@@ -848,15 +1017,15 @@ func (b *VolumeControllerBase) CleanupAllPodsUsingSharedVolume(ctx context.Conte
 						name = refPart
 					}
 
-					// Check if this pod references our SharedVolume
-					if name == sharedVolumeName && namespace == sharedVolumeNamespace {
-						log.Info("Found pod using SharedVolume, force deleting",
+					// Check if this pod references our volume
+					if name == volumeName && namespace == volumeNamespace {
+						log.Info("Found pod using volume, force deleting",
 							"pod", pod.Name,
 							"podNamespace", pod.Namespace,
-							"sharedVolume", sharedVolumeName)
+							"volume", volumeName)
 
 						if err := b.ForceDeletePod(ctx, &pod); err != nil {
-							log.Error(err, "Failed to force delete pod using SharedVolume",
+							log.Error(err, "Failed to force delete pod using volume",
 								"pod", pod.Name, "namespace", pod.Namespace)
 						}
 					}
@@ -867,17 +1036,17 @@ func (b *VolumeControllerBase) CleanupAllPodsUsingSharedVolume(ctx context.Conte
 }
 
 // CleanupReplicaSet deletes the ReplicaSet and any remaining pods
-func (b *VolumeControllerBase) CleanupReplicaSet(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, referenceValue string) {
+func (b *VolumeControllerBase) CleanupReplicaSet(ctx context.Context, volume VolumeObject, referenceValue string) {
 	log := logf.FromContext(ctx)
 
 	rs := &appsv1.ReplicaSet{}
 	if err := b.Get(ctx, client.ObjectKey{
 		Name:      referenceValue,
-		Namespace: sharedVolume.Namespace,
+		Namespace: volume.GetNamespace(),
 	}, rs); err == nil {
 		// First, explicitly delete all pods owned by this ReplicaSet
 		podList := &corev1.PodList{}
-		if err := b.List(ctx, podList, client.InNamespace(sharedVolume.Namespace), client.MatchingLabels{"app": referenceValue}); err == nil {
+		if err := b.List(ctx, podList, client.InNamespace(volume.GetNamespace()), client.MatchingLabels{"app": referenceValue}); err == nil {
 			for _, pod := range podList.Items {
 				log.Info("Force deleting ReplicaSet pod", "name", pod.Name, "namespace", pod.Namespace)
 				if err := b.ForceDeletePod(ctx, &pod); err != nil {
@@ -887,7 +1056,7 @@ func (b *VolumeControllerBase) CleanupReplicaSet(ctx context.Context, sharedVolu
 		}
 
 		// Then delete the ReplicaSet
-		log.Info("Deleting ReplicaSet", "name", referenceValue, "namespace", sharedVolume.Namespace)
+		log.Info("Deleting ReplicaSet", "name", referenceValue, "namespace", volume.GetNamespace())
 		if err := b.Delete(ctx, rs); err != nil {
 			log.Error(err, "Failed to delete ReplicaSet", "name", referenceValue)
 		}
@@ -897,16 +1066,16 @@ func (b *VolumeControllerBase) CleanupReplicaSet(ctx context.Context, sharedVolu
 }
 
 // CleanupService deletes the service
-func (b *VolumeControllerBase) CleanupService(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, referenceValue string) {
+func (b *VolumeControllerBase) CleanupService(ctx context.Context, volume VolumeObject, referenceValue string) {
 	log := logf.FromContext(ctx)
 
 	svcName := fmt.Sprintf("%s", referenceValue)
 	svc := &corev1.Service{}
 	if err := b.Get(ctx, client.ObjectKey{
 		Name:      svcName,
-		Namespace: sharedVolume.Namespace,
+		Namespace: volume.GetNamespace(),
 	}, svc); err == nil {
-		log.Info("Deleting Service", "name", svcName, "namespace", sharedVolume.Namespace)
+		log.Info("Deleting Service", "name", svcName, "namespace", volume.GetNamespace())
 		if err := b.Delete(ctx, svc); err != nil {
 			log.Error(err, "Failed to delete Service", "name", svcName)
 		}
@@ -915,17 +1084,17 @@ func (b *VolumeControllerBase) CleanupService(ctx context.Context, sharedVolume 
 	}
 }
 
-// CleanupAllPVCs deletes all PVCs related to this SharedVolume
-func (b *VolumeControllerBase) CleanupAllPVCs(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, referenceValue string) {
+// CleanupAllPVCs deletes all PVCs related to this volume
+func (b *VolumeControllerBase) CleanupAllPVCs(ctx context.Context, volume VolumeObject, referenceValue string) {
 	log := logf.FromContext(ctx)
 
 	// 1. Delete the main PVC
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := b.Get(ctx, client.ObjectKey{
 		Name:      referenceValue,
-		Namespace: sharedVolume.Namespace,
+		Namespace: volume.GetNamespace(),
 	}, pvc); err == nil {
-		log.Info("Force deleting main PVC", "name", referenceValue, "namespace", sharedVolume.Namespace)
+		log.Info("Force deleting main PVC", "name", referenceValue, "namespace", volume.GetNamespace())
 		if err := b.ForceDeletePVC(ctx, pvc); err != nil {
 			log.Error(err, "Failed to force delete main PVC", "name", referenceValue)
 		}
@@ -950,8 +1119,8 @@ func (b *VolumeControllerBase) CleanupAllPVCs(ctx context.Context, sharedVolume 
 	}
 }
 
-// CleanupAllPVs deletes all PVs related to this SharedVolume
-func (b *VolumeControllerBase) CleanupAllPVs(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, referenceValue string) {
+// CleanupAllPVs deletes all PVs related to this volume
+func (b *VolumeControllerBase) CleanupAllPVs(ctx context.Context, volume VolumeObject, referenceValue string) {
 	log := logf.FromContext(ctx)
 
 	// 1. Delete the main PV
@@ -984,21 +1153,22 @@ func (b *VolumeControllerBase) CleanupAllPVs(ctx context.Context, sharedVolume *
 }
 
 // CleanupNFSServer deletes the NFS server if it was generated
-func (b *VolumeControllerBase) CleanupNFSServer(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) {
+func (b *VolumeControllerBase) CleanupNFSServer(ctx context.Context, volume VolumeObject) {
 	log := logf.FromContext(ctx)
 
-	if sharedVolume.Spec.NfsServer != nil && sharedVolume.Spec.NfsServer.Name != "" {
+	spec := volume.GetVolumeSpec()
+	if spec.NfsServer != nil && spec.NfsServer.Name != "" {
 		nfsServer := &nfsv1alpha1.NfsServer{}
 		if err := b.Get(ctx, client.ObjectKey{
-			Name:      sharedVolume.Spec.NfsServer.Name,
-			Namespace: sharedVolume.Namespace,
+			Name:      spec.NfsServer.Name,
+			Namespace: volume.GetNamespace(),
 		}, nfsServer); err == nil {
-			log.Info("Deleting NFS Server", "name", sharedVolume.Spec.NfsServer.Name, "namespace", sharedVolume.Namespace)
+			log.Info("Deleting NFS Server", "name", spec.NfsServer.Name, "namespace", volume.GetNamespace())
 			if err := b.Delete(ctx, nfsServer); err != nil {
-				log.Error(err, "Failed to delete NfsServer", "name", sharedVolume.Spec.NfsServer.Name)
+				log.Error(err, "Failed to delete NfsServer", "name", spec.NfsServer.Name)
 			}
 		} else if !apierrors.IsNotFound(err) {
-			log.Error(err, "Failed to get NFS Server", "name", sharedVolume.Spec.NfsServer.Name)
+			log.Error(err, "Failed to get NFS Server", "name", spec.NfsServer.Name)
 		}
 	}
 }
@@ -1105,61 +1275,6 @@ func (b *VolumeControllerBase) ForceDeletePV(ctx context.Context, pv *corev1.Per
 	}
 
 	return nil
-}
-
-// RemoveFinalizerWithRetry removes a finalizer from the SharedVolume with retry and conflict handling
-func (b *VolumeControllerBase) RemoveFinalizerWithRetry(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, finalizerName string) error {
-	log := logf.FromContext(ctx)
-
-	// Maximum number of retries
-	maxRetries := 3
-	retryCount := 0
-
-	for {
-		// Get the latest version of the object before updating to prevent conflicts
-		var latestSharedVolume svv1alpha1.SharedVolume
-		if err := b.Get(ctx, client.ObjectKeyFromObject(sharedVolume), &latestSharedVolume); err != nil {
-			if apierrors.IsNotFound(err) {
-				// Object already deleted, nothing to do
-				log.Info("SharedVolume already deleted, no need to remove finalizer")
-				return nil
-			}
-			log.Error(err, "Failed to get latest SharedVolume before finalizer removal")
-			return err
-		}
-
-		// Check if the finalizer is still present
-		if !ContainsString(latestSharedVolume.Finalizers, finalizerName) {
-			log.Info("Finalizer already removed")
-			*sharedVolume = latestSharedVolume
-			return nil
-		}
-
-		// Remove the finalizer from the latest version
-		latestSharedVolume.Finalizers = RemoveString(latestSharedVolume.Finalizers, finalizerName)
-
-		// Update the object
-		if err := b.Update(ctx, &latestSharedVolume); err != nil {
-			if apierrors.IsConflict(err) && retryCount < maxRetries {
-				retryCount++
-				log.Info("Conflict detected while removing finalizer, retrying", "retryCount", retryCount)
-				time.Sleep(time.Millisecond * 100 * time.Duration(retryCount)) // Backoff with each retry
-				continue
-			}
-			if apierrors.IsNotFound(err) {
-				// Object was deleted during our retry, which is fine
-				log.Info("SharedVolume was deleted during finalizer removal")
-				return nil
-			}
-			log.Error(err, "Failed to remove finalizer after retries")
-			return err
-		}
-
-		// Success - update our reference with the latest version
-		*sharedVolume = latestSharedVolume
-		log.Info("Successfully removed finalizer", "finalizer", finalizerName)
-		return nil
-	}
 }
 
 // RemovePVFinalizersWithRetry removes finalizers from a PV with retry logic to handle conflicts
@@ -1286,115 +1401,17 @@ func (b *VolumeControllerBase) ForceDeletePod(ctx context.Context, pod *corev1.P
 	return nil
 }
 
-// ContainsString checks if a slice contains a specific string
-func ContainsString(slice []string, s string) bool {
-	for _, item := range slice {
-		if item == s {
-			return true
-		}
-	}
-	return false
-}
-
-// RemoveString removes a specific string from a slice
-func RemoveString(slice []string, s string) []string {
-	result := []string{}
-	for _, item := range slice {
-		if item != s {
-			result = append(result, item)
-		}
-	}
-	return result
-}
-
-// CheckResourceReadiness checks the readiness of all resources associated with a SharedVolume
-func (b *VolumeControllerBase) CheckResourceReadiness(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) error {
-	log := logf.FromContext(ctx)
-
-	// If reference value is not set, return
-	if sharedVolume.Spec.ReferenceValue == "" {
-		return nil
-	}
-
-	// First check if NFS server is ready
-	nfsReady, _, _, err := b.CheckNfsServerStatus(ctx, sharedVolume)
-	if err != nil {
-		return err
-	}
-
-	if !nfsReady {
-		log.Info("NFS server not ready, marking SharedVolume as not ready")
-		if b.ShouldUpdateReadinessStatus(sharedVolume, false, false) {
-			if err := b.UpdateReadinessStatus(ctx, sharedVolume, false, false); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	// Check if PVC is bound
-	pvcReady, err := b.IsPVCReady(ctx, sharedVolume)
-	if err != nil {
-		return err
-	}
-
-	if !pvcReady {
-		log.Info("PVC not ready yet", "name", sharedVolume.Spec.ReferenceValue)
-		// Don't check ReplicaSet if PVC is not ready, just update status to not ready
-		if b.ShouldUpdateReadinessStatus(sharedVolume, nfsReady, false) {
-			if err := b.UpdateReadinessStatus(ctx, sharedVolume, nfsReady, false); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	// Check if the ReplicaSet is ready
-	replicaSetReady, err := b.IsReplicaSetReady(ctx, sharedVolume)
-	if err != nil {
-		return err
-	}
-
-	// Overall readiness = NFS ready AND PVC ready AND ReplicaSet ready
-	overallReady := nfsReady && pvcReady && replicaSetReady
-
-	log.Info("Overall readiness check",
-		"nfsReady", nfsReady,
-		"pvcReady", pvcReady,
-		"replicaSetReady", replicaSetReady,
-		"overallReady", overallReady)
-
-	// Determine if status update is needed
-	if b.ShouldUpdateReadinessStatus(sharedVolume, nfsReady, replicaSetReady) {
-		log.Info("Resource readiness changed, updating status",
-			"currentPhase", sharedVolume.Status.Phase,
-			"expectedPhase", b.DeterminePhase(nfsReady, replicaSetReady),
-			"nfsReady", nfsReady,
-			"replicaSetReady", replicaSetReady)
-		// Update the status
-		if err := b.UpdateReadinessStatus(ctx, sharedVolume, nfsReady, replicaSetReady); err != nil {
-			return err
-		}
-	} else {
-		log.V(1).Info("Resource readiness unchanged, skipping status update",
-			"phase", sharedVolume.Status.Phase,
-			"nfsReady", nfsReady,
-			"replicaSetReady", replicaSetReady)
-	}
-
-	return nil
-}
-
-// IsReplicaSetReady checks if the ReplicaSet associated with the SharedVolume is ready
-func (b *VolumeControllerBase) IsReplicaSetReady(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) (bool, error) {
+// IsReplicaSetReady checks if the ReplicaSet associated with the volume is ready
+func (r *VolumeControllerBase) IsReplicaSetReady(ctx context.Context, volumeObj VolumeObject, namespace string) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	// Get the ReplicaSet using the reference value
-	replicaSetName := sharedVolume.Spec.ReferenceValue
+	spec := volumeObj.GetVolumeSpec()
+	replicaSetName := spec.ReferenceValue
 	rs := &appsv1.ReplicaSet{}
-	err := b.Get(ctx, client.ObjectKey{
+	err := r.Get(ctx, client.ObjectKey{
 		Name:      replicaSetName,
-		Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+		Namespace: namespace,
 	}, rs)
 
 	if err != nil {
@@ -1421,15 +1438,16 @@ func (b *VolumeControllerBase) IsReplicaSetReady(ctx context.Context, sharedVolu
 	return isReady, nil
 }
 
-// IsPVCReady checks if the PVC associated with the SharedVolume is bound
-func (b *VolumeControllerBase) IsPVCReady(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume) (bool, error) {
+// IsPVCReady checks if the PVC associated with the volume is bound
+func (r *VolumeControllerBase) IsPVCReady(ctx context.Context, volumeObj VolumeObject, namespace string) (bool, error) {
 	log := logf.FromContext(ctx)
 
-	pvcName := sharedVolume.Spec.ReferenceValue
+	spec := volumeObj.GetVolumeSpec()
+	pvcName := spec.ReferenceValue
 	pvc := &corev1.PersistentVolumeClaim{}
-	err := b.Get(ctx, client.ObjectKey{
+	err := r.Get(ctx, client.ObjectKey{
 		Name:      pvcName,
-		Namespace: sharedVolume.Namespace, // Use SharedVolume's namespace
+		Namespace: namespace,
 	}, pvc)
 
 	if err != nil {
@@ -1450,15 +1468,8 @@ func (b *VolumeControllerBase) IsPVCReady(ctx context.Context, sharedVolume *svv
 	return ready, nil
 }
 
-// ShouldUpdateReadinessStatus determines if a status update is needed based on the current status
-func (b *VolumeControllerBase) ShouldUpdateReadinessStatus(sharedVolume *svv1alpha1.SharedVolume, nfsReady, replicaSetReady bool) bool {
-	currentPhase := sharedVolume.Status.Phase
-	expectedPhase := b.DeterminePhase(nfsReady, replicaSetReady)
-	return currentPhase != expectedPhase
-}
-
 // DeterminePhase determines the correct phase based on NFS and ReplicaSet readiness
-func (b *VolumeControllerBase) DeterminePhase(nfsReady, replicaSetReady bool) string {
+func (r *VolumeControllerBase) DeterminePhase(nfsReady, replicaSetReady bool) string {
 	if nfsReady && replicaSetReady {
 		return "Ready"
 	} else if nfsReady && !replicaSetReady {
@@ -1468,98 +1479,638 @@ func (b *VolumeControllerBase) DeterminePhase(nfsReady, replicaSetReady bool) st
 	}
 }
 
-// UpdateReadinessStatus updates the SharedVolume status based on NFS and ReplicaSet readiness
-func (b *VolumeControllerBase) UpdateReadinessStatus(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume, nfsReady, replicaSetReady bool) error {
+// UpdateReadinessStatus updates the volume status based on NFS and ReplicaSet readiness
+func (r *VolumeControllerBase) UpdateReadinessStatus(ctx context.Context, volumeObj VolumeObject, nfsReady, replicaSetReady bool,
+	onReady func(ctx context.Context, volumeObj VolumeObject) error,
+	onNotReady func(ctx context.Context, volumeObj VolumeObject) error) error {
 	log := logf.FromContext(ctx)
 
-	phase := b.DeterminePhase(nfsReady, replicaSetReady)
+	phase := r.DeterminePhase(nfsReady, replicaSetReady)
 	overallReady := phase == "Ready"
+	spec := volumeObj.GetVolumeSpec()
 
-	err := b.UpdateStatusWithRetry(ctx, sharedVolume, func(sv *svv1alpha1.SharedVolume) {
-		sv.Status.Phase = phase
-		switch phase {
-		case "Ready":
-			sv.Status.Message = "SharedVolume is ready for use"
-		case "Preparing":
-			sv.Status.Message = "NFS server is ready, waiting for ReplicaSet to be ready"
-		case "Pending":
-			if !nfsReady {
-				sv.Status.Message = "Waiting for NFS server to be ready"
-			} else {
-				sv.Status.Message = "Waiting for resources to be ready"
+	err := r.UpdateStatusWithRetry(ctx, volumeObj, func(obj client.Object) {
+		if volumeObj, ok := obj.(VolumeObject); ok {
+			volumeObj.SetPhase(phase)
+			switch phase {
+			case "Ready":
+				volumeObj.SetMessage("Volume is ready for use")
+			case "Preparing":
+				volumeObj.SetMessage("NFS server is ready, waiting for ReplicaSet to be ready")
+			case "Pending":
+				if !nfsReady {
+					volumeObj.SetMessage("Waiting for NFS server to be ready")
+				} else {
+					volumeObj.SetMessage("Waiting for resources to be ready")
+				}
 			}
 		}
 	})
 
 	if err != nil {
-		log.Error(err, "Failed to update SharedVolume status")
+		log.Error(err, "Failed to update volume status")
 		return err
 	}
 
+	// Get the latest version to update our local reference
+	latestObj := volumeObj.DeepCopyObject().(VolumeObject)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(volumeObj), latestObj); err != nil {
+		return err
+	}
+	// Copy the latest version back to the original object
+	// Note: This is a generic approach - specific controllers may need to handle this differently
+	volumeObj.SetResourceVersion(latestObj.GetResourceVersion())
+	volumeObj.SetPhase(latestObj.GetPhase())
+	volumeObj.SetMessage(latestObj.GetMessage())
+
 	if overallReady {
-		log.Info("SharedVolume resources are ready",
-			"name", sharedVolume.Name,
-			"referenceID", sharedVolume.Spec.ReferenceValue,
+		log.Info("Volume resources are ready",
+			"name", volumeObj.GetName(),
+			"referenceID", spec.ReferenceValue,
 			"phase", phase)
 
-		// Start sync operations if source is configured and sync controller is available
-		if b.SyncController != nil && sharedVolume.Spec.Source != nil {
-			if err := b.SyncController.StartSyncForSharedVolume(ctx, sharedVolume); err != nil {
-				log.Error(err, "Failed to start sync operations")
-				// Don't return error, sync is not critical for resource readiness
+		// Call the ready callback if provided
+		if onReady != nil {
+			if err := onReady(ctx, volumeObj); err != nil {
+				log.Error(err, "Failed to execute ready callback")
+				// Don't return error, callbacks are not critical for resource readiness
 			}
 		}
 	} else {
-		log.Info("SharedVolume is not fully ready",
-			"name", sharedVolume.Name,
-			"referenceID", sharedVolume.Spec.ReferenceValue,
+		log.Info("Volume is not fully ready",
+			"name", volumeObj.GetName(),
+			"referenceID", spec.ReferenceValue,
 			"phase", phase,
 			"nfsReady", nfsReady,
 			"replicaSetReady", replicaSetReady)
 
-		// Stop sync operations if they were running
-		if b.SyncController != nil {
-			b.SyncController.StopSyncForSharedVolume(sharedVolume)
+		// Call the not ready callback if provided
+		if onNotReady != nil {
+			if err := onNotReady(ctx, volumeObj); err != nil {
+				log.Error(err, "Failed to execute not ready callback")
+				// Don't return error, callbacks are not critical
+			}
 		}
 	}
 
 	return nil
 }
 
-// UpdateStatusWithRetry updates the status of the SharedVolume with retry and conflict handling
-func (b *VolumeControllerBase) UpdateStatusWithRetry(ctx context.Context, sharedVolume *svv1alpha1.SharedVolume,
-	updateFn func(sv *svv1alpha1.SharedVolume)) error {
+// ShouldUpdateReadinessStatus determines if a status update is needed based on the current status
+func (r *VolumeControllerBase) ShouldUpdateReadinessStatus(volumeObj VolumeObject, nfsReady, replicaSetReady bool) bool {
+	currentPhase := volumeObj.GetPhase()
+	expectedPhase := r.DeterminePhase(nfsReady, replicaSetReady)
+	return currentPhase != expectedPhase
+}
+
+// CheckResourceReadiness checks the readiness of all resources associated with a volume
+func (r *VolumeControllerBase) CheckResourceReadiness(ctx context.Context, volumeObj VolumeObject, namespace string,
+	onReady func(ctx context.Context, volumeObj VolumeObject) error,
+	onNotReady func(ctx context.Context, volumeObj VolumeObject) error) error {
 	log := logf.FromContext(ctx)
 
-	// Maximum number of retries
-	maxRetries := 3
-	retryCount := 0
-
-	for {
-		// Get the latest version of the object before updating to prevent conflicts
-		var latestSharedVolume svv1alpha1.SharedVolume
-		if err := b.Get(ctx, client.ObjectKeyFromObject(sharedVolume), &latestSharedVolume); err != nil {
-			log.Error(err, "Failed to get latest SharedVolume before status update")
-			return err
-		}
-
-		// Apply the status update function to the latest object
-		updateFn(&latestSharedVolume)
-
-		// Update the status on the latest version of the object
-		if err := b.Status().Update(ctx, &latestSharedVolume); err != nil {
-			if apierrors.IsConflict(err) && retryCount < maxRetries {
-				retryCount++
-				log.Info("Conflict detected while updating status, retrying", "retryCount", retryCount)
-				time.Sleep(time.Millisecond * 100 * time.Duration(retryCount)) // Backoff with each retry
-				continue
-			}
-			log.Error(err, "Failed to update SharedVolume status after retries")
-			return err
-		}
-
-		// Success - update our reference with the latest version
-		*sharedVolume = latestSharedVolume
+	// If reference value is not set, return
+	spec := volumeObj.GetVolumeSpec()
+	if spec.ReferenceValue == "" {
 		return nil
 	}
+
+	// First check if NFS server is ready
+	nfsReady, _, _, err := r.CheckNfsServerStatus(ctx, volumeObj, namespace)
+	if err != nil {
+		return err
+	}
+
+	if !nfsReady {
+		log.Info("NFS server not ready, marking volume as not ready")
+		if r.ShouldUpdateReadinessStatus(volumeObj, false, false) {
+			if err := r.UpdateReadinessStatus(ctx, volumeObj, false, false, onReady, onNotReady); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Check if PVC is bound
+	pvcReady, err := r.IsPVCReady(ctx, volumeObj, namespace)
+	if err != nil {
+		return err
+	}
+
+	if !pvcReady {
+		log.Info("PVC not ready yet", "name", spec.ReferenceValue)
+		// Don't check ReplicaSet if PVC is not ready, just update status to not ready
+		if r.ShouldUpdateReadinessStatus(volumeObj, nfsReady, false) {
+			if err := r.UpdateReadinessStatus(ctx, volumeObj, nfsReady, false, onReady, onNotReady); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Check if the ReplicaSet is ready
+	replicaSetReady, err := r.IsReplicaSetReady(ctx, volumeObj, namespace)
+	if err != nil {
+		return err
+	}
+
+	// Overall readiness = NFS ready AND PVC ready AND ReplicaSet ready
+	overallReady := nfsReady && pvcReady && replicaSetReady
+
+	log.Info("Overall readiness check",
+		"nfsReady", nfsReady,
+		"pvcReady", pvcReady,
+		"replicaSetReady", replicaSetReady,
+		"overallReady", overallReady)
+
+	// Determine if status update is needed
+	if r.ShouldUpdateReadinessStatus(volumeObj, nfsReady, replicaSetReady) {
+		log.Info("Resource readiness changed, updating status",
+			"currentPhase", volumeObj.GetPhase(),
+			"expectedPhase", r.DeterminePhase(nfsReady, replicaSetReady),
+			"nfsReady", nfsReady,
+			"replicaSetReady", replicaSetReady)
+		// Update the status
+		if err := r.UpdateReadinessStatus(ctx, volumeObj, nfsReady, replicaSetReady, onReady, onNotReady); err != nil {
+			return err
+		}
+	} else {
+		log.V(1).Info("Resource readiness unchanged, skipping status update",
+			"phase", volumeObj.GetPhase(),
+			"nfsReady", nfsReady,
+			"replicaSetReady", replicaSetReady)
+	}
+
+	return nil
+}
+
+// ReconcileNfsServerComplete handles the complete NfsServer lifecycle management including
+// generation, resource reconciliation, and readiness checking
+func (r *VolumeControllerBase) ReconcileNfsServerComplete(ctx context.Context, volumeObj VolumeObject, namespace string, generateNfsServer bool, resourcePrefix string,
+	onReady func(ctx context.Context, volumeObj VolumeObject) error,
+	onNotReady func(ctx context.Context, volumeObj VolumeObject) error) (ctrl.Result, error) {
+
+	// If we need to generate an NfsServer, handle it here
+	if generateNfsServer {
+		result, err := r.GenerateAndCreateNfsServer(ctx, volumeObj, resourcePrefix, namespace)
+		if err != nil {
+			return result, err
+		}
+		// If still in progress, return the result
+		if result.RequeueAfter > 0 {
+			return result, nil
+		}
+	}
+
+	// Use the base controller for status checking and other NFS server management
+	result, err := r.ReconcileNfsServer(ctx, volumeObj, false, namespace) // Always pass false since we handle generation above
+	if err != nil {
+		return result, err
+	}
+
+	// If NFS server is not ready yet, return the result from base
+	if result.RequeueAfter > 0 {
+		return result, nil
+	}
+
+	// Ensure referenceValue is set before reconciling resources
+	spec := volumeObj.GetVolumeSpec()
+	if spec.ReferenceValue == "" {
+		spec.ReferenceValue = resourcePrefix + "-" + r.RandString(12)
+		if err := r.Update(ctx, volumeObj); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Requeue to pick up the updated referenceValue
+		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+	}
+
+	// NFS server is ready, continue with resource reconciliation
+	if err := r.ReconcileRequiredResources(ctx, volumeObj, namespace); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Check if the resources are ready
+	if err := r.CheckResourceReadiness(ctx, volumeObj, namespace, onReady, onNotReady); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Only requeue if the volume is not ready yet
+	if volumeObj.GetPhase() != "Ready" {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// VolumeReconcileConfig holds the configuration for generic volume reconciliation
+type VolumeReconcileConfig struct {
+	VolumeObjFactory       func() VolumeObject
+	APIVersion             string
+	Kind                   string
+	FinalizerName          string
+	Namespace              string // The namespace to use for resource creation
+	CreateReadyCallback    func() func(context.Context, VolumeObject) error
+	CreateNotReadyCallback func() func(context.Context, VolumeObject) error
+}
+
+// ReconcileGeneric provides a complete generic reconciliation pattern for volume objects
+func (r *VolumeControllerBase) ReconcileGeneric(
+	ctx context.Context,
+	req ctrl.Request,
+	config VolumeReconcileConfig,
+) (ctrl.Result, error) {
+
+	// Create a new instance of the volume object
+	volumeObj := config.VolumeObjFactory()
+
+	// Fetch the volume instance
+	if err := r.Get(ctx, req.NamespacedName, volumeObj); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Ensure APIVersion and Kind are set for owner references
+	r.EnsureAPIVersionAndKind(volumeObj, config.APIVersion, config.Kind)
+
+	// Create callbacks
+	onReady := config.CreateReadyCallback()
+	onNotReady := config.CreateNotReadyCallback()
+
+	// Use the generic reconciliation pattern
+	return r.ReconcileVolume(ctx, req, volumeObj, config.FinalizerName, config.Namespace, onReady, onNotReady)
+}
+
+// ReconcileVolume provides a generic reconciliation pattern for volume objects
+func (r *VolumeControllerBase) ReconcileVolume(ctx context.Context, req ctrl.Request,
+	volumeObj VolumeObject, finalizerName string, namespace string,
+	onReady func(context.Context, VolumeObject) error,
+	onNotReady func(context.Context, VolumeObject) error) (ctrl.Result, error) {
+
+	log := logf.FromContext(ctx)
+
+	// Ensure the controller namespace exists
+	if err := r.EnsureControllerNamespace(ctx); err != nil {
+		log.Error(err, "Failed to ensure controller namespace exists")
+		return ctrl.Result{}, err
+	}
+
+	// Handle finalizer logic - returns true to continue, false to exit early
+	shouldContinue, err := r.HandleFinalizerLogic(ctx, volumeObj, finalizerName)
+	if !shouldContinue {
+		return ctrl.Result{}, err
+	}
+
+	// Fill and validate spec
+	generateNfsServer := volumeObj.GetVolumeSpec().NfsServer == nil
+	if err := r.FillAndValidateSpec(volumeObj, generateNfsServer, namespace); err != nil {
+		log.Error(err, "Validation failed")
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Handle NfsServer lifecycle with callbacks
+	return r.ReconcileNfsServerComplete(ctx, volumeObj, namespace, generateNfsServer, "sv", onReady, onNotReady)
+}
+
+// ContainsString checks if a slice contains a specific string
+func ContainsString(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
+}
+
+// RemoveString removes a specific string from a slice
+func RemoveString(slice []string, s string) []string {
+	result := []string{}
+	for _, item := range slice {
+		if item != s {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+// HandleFinalizerLogic handles the common finalizer pattern for volume objects.
+// Returns true if reconciliation should continue, false if it should exit early.
+func (r *VolumeControllerBase) HandleFinalizerLogic(ctx context.Context, obj client.Object, finalizerName string) (bool, error) {
+	// Handle deletion
+	if obj.GetDeletionTimestamp() != nil {
+		return r.handleDeletion(ctx, obj, finalizerName)
+	}
+
+	// Add finalizer if not present
+	return r.ensureFinalizer(ctx, obj, finalizerName)
+}
+
+// handleDeletion handles object deletion with cleanup and finalizer removal
+func (r *VolumeControllerBase) handleDeletion(ctx context.Context, obj client.Object, finalizerName string) (bool, error) {
+	log := logf.FromContext(ctx)
+
+	if !ContainsString(obj.GetFinalizers(), finalizerName) {
+		return false, nil
+	}
+
+	// Run cleanup logic
+	if volumeObj, ok := obj.(VolumeObject); ok {
+		if err := r.CleanupResources(ctx, volumeObj); err != nil {
+			log.Error(err, "Failed to cleanup resources")
+			return false, err
+		}
+	}
+
+	// Remove the finalizer to allow deletion with retry logic
+	if err := r.RemoveFinalizerWithRetry(ctx, obj, finalizerName); err != nil {
+		log.Error(err, "Failed to remove finalizer")
+		return false, err
+	}
+
+	return false, nil
+}
+
+// ensureFinalizer adds finalizer if not present
+func (r *VolumeControllerBase) ensureFinalizer(ctx context.Context, obj client.Object, finalizerName string) (bool, error) {
+	log := logf.FromContext(ctx)
+
+	if ContainsString(obj.GetFinalizers(), finalizerName) {
+		return true, nil
+	}
+
+	finalizers := obj.GetFinalizers()
+	finalizers = append(finalizers, finalizerName)
+	obj.SetFinalizers(finalizers)
+	if err := r.Update(ctx, obj); err != nil {
+		log.Error(err, "Failed to add finalizer")
+		return false, err
+	}
+
+	return true, nil
+}
+
+// EnsureAPIVersionAndKind ensures that APIVersion and Kind are set for owner references
+func (r *VolumeControllerBase) EnsureAPIVersionAndKind(obj client.Object, apiVersion, kind string) {
+	// For runtime objects, we need to set the fields directly
+	// This is done by type assertion to the specific volume type
+	// The caller will handle the type-specific logic
+
+	// Set the TypeMeta fields through reflection if needed
+	if runtimeObj, ok := obj.(interface{ SetAPIVersion(string) }); ok {
+		if runtimeObj2, ok := obj.(interface{ GetAPIVersion() string }); ok {
+			if runtimeObj2.GetAPIVersion() == "" {
+				runtimeObj.SetAPIVersion(apiVersion)
+			}
+		}
+	}
+
+	if runtimeObj, ok := obj.(interface{ SetKind(string) }); ok {
+		if runtimeObj2, ok := obj.(interface{ GetKind() string }); ok {
+			if runtimeObj2.GetKind() == "" {
+				runtimeObj.SetKind(kind)
+			}
+		}
+	}
+}
+
+// WaitForPodsToTerminate waits for all pods related to a volume to fully terminate
+// before proceeding with PVC deletion to avoid stuck pod termination
+func (b *VolumeControllerBase) WaitForPodsToTerminate(ctx context.Context, volume VolumeObject, referenceValue string) {
+	log := logf.FromContext(ctx)
+
+	maxWaitTime := 60 * time.Second
+	pollInterval := 2 * time.Second
+	timeout := time.Now().Add(maxWaitTime)
+
+	for time.Now().Before(timeout) {
+		// Check for any remaining pods with the volume's label
+		podList := &corev1.PodList{}
+		if err := b.List(ctx, podList, client.InNamespace(volume.GetNamespace()), client.MatchingLabels{"app": referenceValue}); err != nil {
+			log.Error(err, "Failed to list pods while waiting for termination", "referenceValue", referenceValue)
+			return
+		}
+
+		if len(podList.Items) == 0 {
+			log.Info("All pods have terminated, proceeding with PVC cleanup", "referenceValue", referenceValue)
+			return
+		}
+
+		// Log remaining pods
+		for _, pod := range podList.Items {
+			log.Info("Waiting for pod to terminate", "pod", pod.Name, "phase", pod.Status.Phase, "deletionTimestamp", pod.DeletionTimestamp)
+		}
+
+		// Wait before checking again
+		select {
+		case <-time.After(pollInterval):
+			continue
+		case <-ctx.Done():
+			log.Info("Context cancelled while waiting for pods to terminate")
+			return
+		}
+	}
+
+	log.Info("Timeout waiting for pods to terminate, proceeding with cleanup anyway", "referenceValue", referenceValue, "maxWaitTime", maxWaitTime)
+}
+
+// Generic callback creation functions
+
+// CreateSyncReadyCallback creates a generic callback for when volume is ready that handles sync operations
+func (r *VolumeControllerBase) CreateSyncReadyCallback() func(context.Context, VolumeObject) error {
+	return func(ctx context.Context, volumeObj VolumeObject) error {
+		// Start sync operations if sync controller is available and source is configured
+		if r.SyncController != nil {
+			// Check if this is a SharedVolume with source configuration
+			if sv, ok := volumeObj.(*svv1alpha1.SharedVolume); ok && sv.Spec.Source != nil {
+				if err := r.SyncController.StartSyncForSharedVolume(ctx, sv); err != nil {
+					return err
+				}
+			}
+			// Add support for other volume types here when needed
+			// if csv, ok := volumeObj.(*svv1alpha1.ClusterSharedVolume); ok && csv.Spec.Source != nil {
+			//     return r.SyncController.StartSyncForClusterSharedVolume(ctx, csv)
+			// }
+		}
+		return nil
+	}
+}
+
+// CreateSyncNotReadyCallback creates a generic callback for when volume is not ready that handles sync operations
+func (r *VolumeControllerBase) CreateSyncNotReadyCallback() func(context.Context, VolumeObject) error {
+	return func(ctx context.Context, volumeObj VolumeObject) error {
+		// Stop sync operations if they were running
+		if r.SyncController != nil {
+			// Check if this is a SharedVolume
+			if sv, ok := volumeObj.(*svv1alpha1.SharedVolume); ok {
+				r.SyncController.StopSyncForSharedVolume(sv)
+			}
+			// Add support for other volume types here when needed
+			// if csv, ok := volumeObj.(*svv1alpha1.ClusterSharedVolume); ok {
+			//     r.SyncController.StopSyncForClusterSharedVolume(csv)
+			// }
+		}
+		return nil
+	}
+}
+
+// CreateNoOpReadyCallback creates a callback that does nothing when volume is ready
+func (r *VolumeControllerBase) CreateNoOpReadyCallback() func(context.Context, VolumeObject) error {
+	return func(ctx context.Context, volumeObj VolumeObject) error {
+		return nil
+	}
+}
+
+// CreateNoOpNotReadyCallback creates a callback that does nothing when volume is not ready
+func (r *VolumeControllerBase) CreateNoOpNotReadyCallback() func(context.Context, VolumeObject) error {
+	return func(ctx context.Context, volumeObj VolumeObject) error {
+		return nil
+	}
+}
+
+// Generic runnable and setup patterns
+
+// OneTimeRecoveryRunnable is a generic runnable that executes a recovery operation once
+type OneTimeRecoveryRunnable struct {
+	name         string
+	recoveryFunc func(context.Context) error
+	recovered    bool
+	needsLeader  bool
+}
+
+// NewOneTimeRecoveryRunnable creates a new one-time recovery runnable
+func NewOneTimeRecoveryRunnable(name string, recoveryFunc func(context.Context) error, needsLeader bool) *OneTimeRecoveryRunnable {
+	return &OneTimeRecoveryRunnable{
+		name:         name,
+		recoveryFunc: recoveryFunc,
+		needsLeader:  needsLeader,
+	}
+}
+
+// Start implements the Runnable interface
+func (r *OneTimeRecoveryRunnable) Start(ctx context.Context) error {
+	log := logf.FromContext(ctx).WithName(r.name)
+
+	// Only run recovery once
+	if r.recovered {
+		log.Info("Recovery already completed, skipping")
+		return nil
+	}
+
+	// Wait a moment for the cache to be fully synced
+	select {
+	case <-time.After(5 * time.Second):
+		// Continue with recovery
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	log.Info("Starting recovery operation")
+
+	if err := r.recoveryFunc(ctx); err != nil {
+		log.Error(err, "Failed to execute recovery operation")
+		// Don't return error - this shouldn't stop the controller
+	}
+
+	// Mark recovery as completed
+	r.recovered = true
+
+	// This runnable completes after recovery, so return nil to indicate completion
+	return nil
+}
+
+// NeedLeaderElection returns whether this runnable needs leader election
+func (r *OneTimeRecoveryRunnable) NeedLeaderElection() bool {
+	return r.needsLeader
+}
+
+// ControllerSetupConfig holds configuration for generic controller setup
+type ControllerSetupConfig struct {
+	VolumeType          client.Object
+	ControllerName      string
+	ControllerNamespace string
+	PreSetupHook        func(ctrl.Manager, *VolumeControllerBase) error
+	Runnables           []manager.Runnable // Use controller-runtime manager.Runnable interface
+}
+
+// SetupGenericController provides a fully generic controller setup pattern
+func (r *VolumeControllerBase) SetupGenericController(mgr ctrl.Manager, config ControllerSetupConfig, reconciler interface{}) error {
+	// Use the existing generic setup pattern
+	builder := r.SetupGenericVolumeController(
+		mgr,
+		config.VolumeType,
+		config.ControllerName,
+		config.ControllerNamespace,
+		config.PreSetupHook,
+	)
+
+	// Add any additional runnables to the manager
+	for _, runnable := range config.Runnables {
+		if err := mgr.Add(runnable); err != nil {
+			return fmt.Errorf("failed to add runnable to manager: %w", err)
+		}
+	}
+
+	// Complete the setup with the reconciler
+	return builder.(interface{ Complete(interface{}) error }).Complete(reconciler)
+}
+
+// CreateSyncControllerSetupHook creates a pre-setup hook for controllers that need sync operations
+func (r *VolumeControllerBase) CreateSyncControllerSetupHook(createSyncController func(client.Client, *runtime.Scheme) *SyncController, recoveryFunc func(context.Context) error) func(ctrl.Manager, *VolumeControllerBase) error {
+	return func(mgr ctrl.Manager, base *VolumeControllerBase) error {
+		// Initialize sync controller
+		syncController := createSyncController(mgr.GetClient(), mgr.GetScheme())
+
+		// Update the base controller with sync controller
+		base.SyncController = syncController
+
+		// Add a recovery runnable if recovery function is provided
+		if recoveryFunc != nil {
+			recovery := NewOneTimeRecoveryRunnable("sync-recovery", recoveryFunc, true)
+			if err := mgr.Add(recovery); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+}
+
+// SetupGenericVolumeController provides a generic setup pattern for volume controllers
+func (r *VolumeControllerBase) SetupGenericVolumeController(
+	mgr ctrl.Manager,
+	volumeType client.Object,
+	controllerName string,
+	defaultNamespace string,
+	preSetupHook func(ctrl.Manager, *VolumeControllerBase) error,
+) interface{} {
+	// Set the controller namespace
+	controllerNamespace := defaultNamespace
+	if controllerNamespace == "" {
+		controllerNamespace = "shared-volume-controller"
+	}
+
+	// Initialize the base controller if not already done
+	if r.Client == nil {
+		*r = *NewVolumeControllerBase(mgr.GetClient(), mgr.GetScheme(), controllerNamespace, nil)
+	}
+
+	// Call pre-setup hook for controller-specific initialization
+	if preSetupHook != nil {
+		if err := preSetupHook(mgr, r); err != nil {
+			// Log error but continue
+			log := logf.FromContext(context.Background())
+			log.Error(err, "Failed in pre-setup hook")
+		}
+	}
+
+	// Create the controller builder with standard watches
+	return ctrl.NewControllerManagedBy(mgr).
+		For(volumeType).
+		Watches(&appsv1.ReplicaSet{},
+			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), volumeType)).
+		Watches(&corev1.PersistentVolumeClaim{},
+			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), volumeType)).
+		Watches(&corev1.Service{},
+			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), volumeType)).
+		Watches(&nfsv1alpha1.NfsServer{},
+			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), volumeType)).
+		Named(controllerName)
 }

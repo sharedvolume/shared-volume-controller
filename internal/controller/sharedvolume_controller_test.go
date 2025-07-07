@@ -117,7 +117,7 @@ var _ = Describe("SharedVolume Controller", func() {
 			// Call FillAndValidateSpec and validate results
 			generateNfsServer := false // We're already providing NfsServer
 			base := NewVolumeControllerBase(k8sClient, k8sClient.Scheme(), "shared-volume-controller", nil)
-			err := base.FillAndValidateSpec(sharedVolume, generateNfsServer)
+			err := base.FillAndValidateSpec(sharedVolume, generateNfsServer, "test-namespace")
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify Path is defaulted to "/"
@@ -148,7 +148,7 @@ var _ = Describe("SharedVolume Controller", func() {
 			// Call FillAndValidateSpec and validate results
 			generateNfsServer := false // We're already providing NfsServer
 			base := NewVolumeControllerBase(k8sClient, k8sClient.Scheme(), "shared-volume-controller", nil)
-			err := base.FillAndValidateSpec(sharedVolume, generateNfsServer)
+			err := base.FillAndValidateSpec(sharedVolume, generateNfsServer, "test-namespace")
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify Path is preserved
