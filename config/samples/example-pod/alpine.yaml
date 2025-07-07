@@ -3,7 +3,7 @@ kind: Pod
 metadata:
   name: alpine-sample-pod-1
   annotations:
-    sharedvolume.csv: "csv1"
+    sharedvolume.csv: "csv12"
   labels:
     app: alpine-sample
 spec:

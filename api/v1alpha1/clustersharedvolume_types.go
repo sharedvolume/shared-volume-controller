@@ -49,7 +49,7 @@ type ClusterSharedVolumeStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:scope=Cluster,shortName=csv
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="NFS Address",type=string,JSONPath=`.status.nfsServerAddress`
 // +kubebuilder:printcolumn:name="Mount Path",type=string,JSONPath=`.spec.mountPath`

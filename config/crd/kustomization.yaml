@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/sv.sharedvolume.io_sharedvolumes.yaml
+- bases/sv.sharedvolume.io_clustersharedvolumes.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

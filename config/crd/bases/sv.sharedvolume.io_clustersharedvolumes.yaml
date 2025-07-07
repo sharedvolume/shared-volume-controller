@@ -11,6 +11,8 @@ spec:
     kind: ClusterSharedVolume
     listKind: ClusterSharedVolumeList
     plural: clustersharedvolumes
+    shortNames:
+    - csv
     singular: clustersharedvolume
   scope: Cluster
   versions:
