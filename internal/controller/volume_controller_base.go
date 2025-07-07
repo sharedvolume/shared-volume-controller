@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	nfsv1alpha1 "github.com/sharedvolume/nfs-server-controller/api/v1alpha1"
 	svv1alpha1 "github.com/sharedvolume/shared-volume-controller/api/v1alpha1"
@@ -2032,14 +2033,25 @@ type ControllerSetupConfig struct {
 
 // SetupGenericController provides a fully generic controller setup pattern
 func (r *VolumeControllerBase) SetupGenericController(mgr ctrl.Manager, config ControllerSetupConfig, reconciler interface{}) error {
-	// Use the existing generic setup pattern
-	builder := r.SetupGenericVolumeController(
-		mgr,
-		config.VolumeType,
-		config.ControllerName,
-		config.ControllerNamespace,
-		config.PreSetupHook,
-	)
+	// Set the controller namespace
+	controllerNamespace := config.ControllerNamespace
+	if controllerNamespace == "" {
+		controllerNamespace = "shared-volume-controller"
+	}
+
+	// Initialize the base controller if not already done
+	if r.Client == nil {
+		*r = *NewVolumeControllerBase(mgr.GetClient(), mgr.GetScheme(), controllerNamespace, nil)
+	}
+
+	// Call pre-setup hook for controller-specific initialization
+	if config.PreSetupHook != nil {
+		if err := config.PreSetupHook(mgr, r); err != nil {
+			// Log error but continue
+			log := logf.FromContext(context.Background())
+			log.Error(err, "Failed in pre-setup hook")
+		}
+	}
 
 	// Add any additional runnables to the manager
 	for _, runnable := range config.Runnables {
@@ -2048,8 +2060,19 @@ func (r *VolumeControllerBase) SetupGenericController(mgr ctrl.Manager, config C
 		}
 	}
 
-	// Complete the setup with the reconciler
-	return builder.(interface{ Complete(interface{}) error }).Complete(reconciler)
+	// Create and complete the controller builder with standard watches
+	return ctrl.NewControllerManagedBy(mgr).
+		For(config.VolumeType).
+		Watches(&appsv1.ReplicaSet{},
+			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), config.VolumeType)).
+		Watches(&corev1.PersistentVolumeClaim{},
+			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), config.VolumeType)).
+		Watches(&corev1.Service{},
+			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), config.VolumeType)).
+		Watches(&nfsv1alpha1.NfsServer{},
+			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), config.VolumeType)).
+		Named(config.ControllerName).
+		Complete(reconciler.(reconcile.Reconciler))
 }
 
 // CreateSyncControllerSetupHook creates a pre-setup hook for controllers that need sync operations
@@ -2071,46 +2094,4 @@ func (r *VolumeControllerBase) CreateSyncControllerSetupHook(createSyncControlle
 
 		return nil
 	}
-}
-
-// SetupGenericVolumeController provides a generic setup pattern for volume controllers
-func (r *VolumeControllerBase) SetupGenericVolumeController(
-	mgr ctrl.Manager,
-	volumeType client.Object,
-	controllerName string,
-	defaultNamespace string,
-	preSetupHook func(ctrl.Manager, *VolumeControllerBase) error,
-) interface{} {
-	// Set the controller namespace
-	controllerNamespace := defaultNamespace
-	if controllerNamespace == "" {
-		controllerNamespace = "shared-volume-controller"
-	}
-
-	// Initialize the base controller if not already done
-	if r.Client == nil {
-		*r = *NewVolumeControllerBase(mgr.GetClient(), mgr.GetScheme(), controllerNamespace, nil)
-	}
-
-	// Call pre-setup hook for controller-specific initialization
-	if preSetupHook != nil {
-		if err := preSetupHook(mgr, r); err != nil {
-			// Log error but continue
-			log := logf.FromContext(context.Background())
-			log.Error(err, "Failed in pre-setup hook")
-		}
-	}
-
-	// Create the controller builder with standard watches
-	return ctrl.NewControllerManagedBy(mgr).
-		For(volumeType).
-		Watches(&appsv1.ReplicaSet{},
-			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), volumeType)).
-		Watches(&corev1.PersistentVolumeClaim{},
-			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), volumeType)).
-		Watches(&corev1.Service{},
-			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), volumeType)).
-		Watches(&nfsv1alpha1.NfsServer{},
-			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), volumeType)).
-		Named(controllerName)
 }
