@@ -303,7 +303,7 @@ func (r *PodCleanupReconciler) cleanupSharedVolumeResources(ctx context.Context,
 
 	for _, svRef := range svRefs {
 		// Determine if this is a ClusterSharedVolume based on namespace
-		isClusterSharedVolume := svRef.Namespace == "shared-volume-controller-operation"
+		isClusterSharedVolume := svRef.Namespace == "shared-volume-controller"
 
 		var referenceValue string
 		var resourceNamespace string

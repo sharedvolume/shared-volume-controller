@@ -76,7 +76,7 @@ spec:
 2. **ClusterSharedVolume (sharedvolume.csv)**:
    - Looks for ClusterSharedVolume resources (cluster-scoped, no namespace)
    - Creates PV/PVC in the pod's namespace
-   - Uses the static namespace "shared-volume-controller-operation" for resource operations
+   - Uses the static namespace "shared-volume-controller" for resource operations
 
 3. **Same Finalizer**: Both use `sharedvolume.sv/pod-cleanup` finalizer for cleanup
 

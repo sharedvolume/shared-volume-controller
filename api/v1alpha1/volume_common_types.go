@@ -23,10 +23,35 @@ type StorageSpec struct {
 type SSHSourceSpec struct {
 	Host                 string             `json:"host"`
 	Port                 int                `json:"port,omitempty"`
-	Username             string             `json:"username,omitempty"`
+	User                 string             `json:"user,omitempty"`
+	Password             string             `json:"password,omitempty"`
 	PrivateKey           string             `json:"privateKey,omitempty"`
 	Path                 string             `json:"path,omitempty"`
 	PrivateKeyFromSecret *SecretKeySelector `json:"privateKeyFromSecret,omitempty"`
+}
+
+// HTTPSourceSpec defines HTTP source configuration.
+type HTTPSourceSpec struct {
+	URL string `json:"url"`
+}
+
+// GitSourceSpec defines Git source configuration.
+type GitSourceSpec struct {
+	URL        string `json:"url"`
+	User       string `json:"user,omitempty"`
+	Password   string `json:"password,omitempty"`
+	PrivateKey string `json:"privateKey,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+}
+
+// S3SourceSpec defines S3 source configuration.
+type S3SourceSpec struct {
+	EndpointURL string `json:"endpointUrl"`
+	BucketName  string `json:"bucketName"`
+	Path        string `json:"path,omitempty"`
+	AccessKey   string `json:"accessKey"`
+	SecretKey   string `json:"secretKey"`
+	Region      string `json:"region"`
 }
 
 type SecretKeySelector struct {
@@ -36,7 +61,10 @@ type SecretKeySelector struct {
 
 // VolumeSourceSpec defines the source for the shared volume.
 type VolumeSourceSpec struct {
-	SSH *SSHSourceSpec `json:"ssh,omitempty"`
+	SSH  *SSHSourceSpec  `json:"ssh,omitempty"`
+	HTTP *HTTPSourceSpec `json:"http,omitempty"`
+	Git  *GitSourceSpec  `json:"git,omitempty"`
+	S3   *S3SourceSpec   `json:"s3,omitempty"`
 }
 
 // VolumeSpecBase contains common fields for SharedVolume.

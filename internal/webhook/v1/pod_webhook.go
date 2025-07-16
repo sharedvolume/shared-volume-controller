@@ -46,7 +46,7 @@ const (
 	// ClusterSharedVolumeAnnotationKey for ClusterSharedVolume annotation
 	ClusterSharedVolumeAnnotationKey = "sharedvolume.csv"
 	// ClusterSharedVolumeOperationNamespace is the namespace used for ClusterSharedVolume operations
-	ClusterSharedVolumeOperationNamespace = "shared-volume-controller-operation"
+	ClusterSharedVolumeOperationNamespace = "shared-volume-controller"
 )
 
 // +kubebuilder:webhook:path=/mutate-v1-pod,mutating=true,failurePolicy=fail,sideEffects=None,groups="",resources=pods,verbs=create;update,versions=v1,name=mpod.kb.io,admissionReviewVersions=v1
@@ -366,7 +366,7 @@ func (a *PodAnnotator) ensurePersistentVolumeGeneric(ctx context.Context, spec *
 	}
 
 	// Build share path - match controller's folder structure: {basePath}/{volumeName}-{namespace}
-	// For csv1 ClusterSharedVolume, this will create: /csv1-shared-volume-controller-operation
+	// For csv1 ClusterSharedVolume, this will create: /csv1-shared-volume-controller
 	// For sv1 SharedVolume in myns namespace, this will create: /sv1-myns
 	sharePath := fmt.Sprintf("%s/%s-%s", nfsServer.Path, volumeName, volumeNamespace)
 
@@ -463,7 +463,7 @@ func (a *PodAnnotator) ensurePersistentVolumeClaimGeneric(ctx context.Context, s
 }
 
 // ensureProxyPersistentVolumeClaim creates a PVC in the pod's namespace that references the same PV
-// This is needed for ClusterSharedVolume where the main PVC is in shared-volume-controller-operation
+// This is needed for ClusterSharedVolume where the main PVC is in shared-volume-controller
 // but the pod needs a PVC in its own namespace to reference
 func (a *PodAnnotator) ensureProxyPersistentVolumeClaim(ctx context.Context, spec *svv1alpha1.SharedVolumeSpec, referenceValue, mainNamespace, podNamespace string) error {
 	pvName := fmt.Sprintf(pvPvcNameTemplate, referenceValue, mainNamespace)

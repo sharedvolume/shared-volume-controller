@@ -27,7 +27,7 @@ import (
 
 const (
 	// ClusterSharedVolumeOperationNamespace is the namespace used for ClusterSharedVolume operations
-	ClusterSharedVolumeOperationNamespace = "shared-volume-controller-operation"
+	ClusterSharedVolumeOperationNamespace = "shared-volume-controller"
 )
 
 // ClusterSharedVolumeReconciler reconciles a ClusterSharedVolume object

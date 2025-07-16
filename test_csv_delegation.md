@@ -35,7 +35,7 @@ EOF
 #### Check SharedVolume Creation
 ```bash
 # Verify SharedVolume is created in operation namespace with same name
-kubectl get sharedvolume -n shared-volume-controller-operation
+kubectl get sharedvolume -n shared-volume-controller
 
 # Should show: test-csv SharedVolume
 ```
@@ -43,10 +43,10 @@ kubectl get sharedvolume -n shared-volume-controller-operation
 #### Check NfsServer Creation
 ```bash
 # Should see exactly ONE NfsServer created by SharedVolume controller
-kubectl get nfsserver -n shared-volume-controller-operation
+kubectl get nfsserver -n shared-volume-controller
 
 # Check the NfsServer is owned by SharedVolume
-kubectl get nfsserver test-csv-nfs -n shared-volume-controller-operation -o yaml | grep ownerReferences -A 10
+kubectl get nfsserver test-csv-nfs -n shared-volume-controller -o yaml | grep ownerReferences -A 10
 ```
 
 #### Monitor Controller Logs
@@ -63,7 +63,7 @@ kubectl logs -n shared-volume-controller-system deployment/shared-volume-control
 ```bash
 # Check CSV status mirrors SV status
 kubectl get clustersharedvolume test-csv -o yaml | grep -A 10 status:
-kubectl get sharedvolume test-csv -n shared-volume-controller-operation -o yaml | grep -A 10 status:
+kubectl get sharedvolume test-csv -n shared-volume-controller -o yaml | grep -A 10 status:
 ```
 
 ### Expected Results
@@ -79,5 +79,5 @@ kubectl get sharedvolume test-csv -n shared-volume-controller-operation -o yaml 
 ```bash
 kubectl delete clustersharedvolume test-csv
 # Verify all resources are cleaned up
-kubectl get all -n shared-volume-controller-operation
+kubectl get all -n shared-volume-controller
 ```

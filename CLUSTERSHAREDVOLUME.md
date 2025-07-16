@@ -54,7 +54,7 @@ spec:
 
 ### Controller Namespace and Resource Management
 
-Since `ClusterSharedVolume` is cluster-scoped but needs to create namespaced resources, the CSV controller creates a corresponding `SharedVolume` in the operation namespace: `shared-volume-controller-operation`.
+Since `ClusterSharedVolume` is cluster-scoped but needs to create namespaced resources, the CSV controller creates a corresponding `SharedVolume` in the operation namespace: `shared-volume-controller`.
 
 **Resource Creation Flow:**
 1. CSV controller creates SharedVolume in operation namespace with same name and owner reference to CSV
@@ -76,7 +76,7 @@ This namespace is automatically created by the controller when the first Cluster
 | Feature | SharedVolume | ClusterSharedVolume |
 |---------|--------------|-------------------|
 | Scope | Namespaced | Cluster |
-| Resource Namespace | Same as CR | Operation namespace (`shared-volume-controller-operation`) |
+| Resource Namespace | Same as CR | Operation namespace (`shared-volume-controller`) |
 | API Group | sv.sharedvolume.io | sv.sharedvolume.io |
 | Short Name | sv | csv |
 
@@ -85,7 +85,7 @@ This namespace is automatically created by the controller when the first Cluster
 The `ClusterSharedVolumeReconciler`:
 
 1. Converts `ClusterSharedVolume` to `SharedVolume` for compatibility
-2. Uses the operation namespace (`shared-volume-controller-operation`) for all created resources
+2. Uses the operation namespace (`shared-volume-controller`) for all created resources
 3. Automatically creates the operation namespace if it doesn't exist
 4. Reuses all logic from `VolumeControllerBase`
 5. Maintains separate finalizer management for cluster-scoped resources

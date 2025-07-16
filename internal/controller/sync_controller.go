@@ -47,8 +47,8 @@ type SyncRequest struct {
 }
 
 type SyncSource struct {
-	Type    string        `json:"type"`
-	Details SyncSourceSSH `json:"details"`
+	Type    string      `json:"type"`
+	Details interface{} `json:"details"`
 }
 
 type SyncSourceSSH struct {
@@ -57,6 +57,27 @@ type SyncSourceSSH struct {
 	Username   string `json:"username"`
 	Path       string `json:"path"`
 	PrivateKey string `json:"privateKey"`
+}
+
+type SyncSourceHTTP struct {
+	URL string `json:"url"`
+}
+
+type SyncSourceGit struct {
+	URL        string `json:"url"`
+	Username   string `json:"username,omitempty"`
+	Password   string `json:"password,omitempty"`
+	PrivateKey string `json:"privateKey,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+}
+
+type SyncSourceS3 struct {
+	EndpointURL string `json:"endpointUrl"`
+	BucketName  string `json:"bucketName"`
+	Path        string `json:"path,omitempty"`
+	AccessKey   string `json:"accessKey"`
+	SecretKey   string `json:"secretKey"`
+	Region      string `json:"region"`
 }
 
 type SyncTarget struct {
@@ -86,12 +107,20 @@ func NewSyncController(client client.Client, scheme *runtime.Scheme) *SyncContro
 	}
 }
 
+// hasValidSource checks if the SharedVolume has any valid source configured
+func (s *SyncController) hasValidSource(sv *svv1alpha1.SharedVolume) bool {
+	if sv.Spec.Source == nil {
+		return false
+	}
+	return sv.Spec.Source.SSH != nil || sv.Spec.Source.HTTP != nil || sv.Spec.Source.Git != nil || sv.Spec.Source.S3 != nil
+}
+
 // StartSyncForSharedVolume starts sync operations for a SharedVolume
 func (s *SyncController) StartSyncForSharedVolume(ctx context.Context, sv *svv1alpha1.SharedVolume) error {
 	log := logf.FromContext(ctx).WithName(SyncControllerName)
 
 	// Check if SharedVolume is ready and has source configured
-	if sv.Status.Phase != "Ready" || sv.Spec.Source == nil || sv.Spec.Source.SSH == nil {
+	if sv.Status.Phase != "Ready" || !s.hasValidSource(sv) {
 		log.Info("SharedVolume not ready for sync or source not configured",
 			"name", sv.Name, "namespace", sv.Namespace, "phase", sv.Status.Phase)
 		return nil
@@ -201,7 +230,7 @@ func (s *SyncController) scheduledSync(sv *svv1alpha1.SharedVolume, interval tim
 	}
 
 	// Check if SharedVolume is still ready and has source configured
-	if latestSV.Status.Phase != "Ready" || latestSV.Spec.Source == nil || latestSV.Spec.Source.SSH == nil {
+	if latestSV.Status.Phase != "Ready" || !s.hasValidSource(&latestSV) {
 		log.Info("SharedVolume no longer ready for sync, will check again at next interval",
 			"name", sv.Name, "namespace", sv.Namespace, "phase", latestSV.Status.Phase)
 		return
@@ -238,11 +267,8 @@ func (s *SyncController) triggerSync(ctx context.Context, sv *svv1alpha1.SharedV
 		"url", fmt.Sprintf("http://%s.%s.svc.cluster.local:8080/api/1.0/sync", sv.Spec.ReferenceValue, sv.Namespace),
 		"payload", string(payload),
 		"targetPath", syncReq.Target.Path,
-		"sourceHost", syncReq.Source.Details.Host,
-		"sourceUsername", syncReq.Source.Details.Username,
-		"sourcePath", syncReq.Source.Details.Path,
-		"timeout", syncReq.Timeout,
-		"privateKeyPrefix", syncReq.Source.Details.PrivateKey[:50]+"...")
+		"sourceType", syncReq.Source.Type,
+		"timeout", syncReq.Timeout)
 
 	// Build URL using Kubernetes service DNS format
 	url := fmt.Sprintf("http://%s.%s.svc.cluster.local:8080/api/1.0/sync", sv.Spec.ReferenceValue, sv.Namespace)
@@ -277,10 +303,35 @@ func (s *SyncController) triggerSync(ctx context.Context, sv *svv1alpha1.SharedV
 
 // buildSyncRequest builds the sync request payload from SharedVolume spec
 func (s *SyncController) buildSyncRequest(ctx context.Context, sv *svv1alpha1.SharedVolume) (*SyncRequest, error) {
-	if sv.Spec.Source == nil || sv.Spec.Source.SSH == nil {
-		return nil, fmt.Errorf("SSH source not configured")
+	if sv.Spec.Source == nil {
+		return nil, fmt.Errorf("no source configured")
 	}
 
+	// Set default timeout if not specified
+	timeout := sv.Spec.SyncTimeout
+	if timeout == "" {
+		timeout = "120s"
+	}
+
+	// Build target path: /nfs/{sv.Name}-{sv.Namespace}
+	targetPath := fmt.Sprintf("/nfs/%s-%s", sv.Name, sv.Namespace)
+
+	// Handle different source types
+	if sv.Spec.Source.SSH != nil {
+		return s.buildSSHSyncRequest(ctx, sv, timeout, targetPath)
+	} else if sv.Spec.Source.HTTP != nil {
+		return s.buildHTTPSyncRequest(sv, timeout, targetPath)
+	} else if sv.Spec.Source.Git != nil {
+		return s.buildGitSyncRequest(sv, timeout, targetPath)
+	} else if sv.Spec.Source.S3 != nil {
+		return s.buildS3SyncRequest(sv, timeout, targetPath)
+	}
+
+	return nil, fmt.Errorf("no valid source type configured")
+}
+
+// buildSSHSyncRequest builds sync request for SSH source
+func (s *SyncController) buildSSHSyncRequest(ctx context.Context, sv *svv1alpha1.SharedVolume, timeout, targetPath string) (*SyncRequest, error) {
 	ssh := sv.Spec.Source.SSH
 
 	// Get private key (could be direct or from secret)
@@ -308,24 +359,78 @@ func (s *SyncController) buildSyncRequest(ctx context.Context, sv *svv1alpha1.Sh
 		port = 22
 	}
 
-	// Set default timeout if not specified
-	timeout := sv.Spec.SyncTimeout
-	if timeout == "" {
-		timeout = "120s"
-	}
-
-	// Build target path: /nfs/{sv.Name}-{sv.Namespace}
-	targetPath := fmt.Sprintf("/nfs/%s-%s", sv.Name, sv.Namespace)
-
 	return &SyncRequest{
 		Source: SyncSource{
 			Type: "ssh",
 			Details: SyncSourceSSH{
 				Host:       ssh.Host,
 				Port:       port,
-				Username:   ssh.Username,
+				Username:   ssh.User,
 				Path:       ssh.Path,
 				PrivateKey: privateKey,
+			},
+		},
+		Target: SyncTarget{
+			Path: targetPath,
+		},
+		Timeout: timeout,
+	}, nil
+}
+
+// buildHTTPSyncRequest builds sync request for HTTP source
+func (s *SyncController) buildHTTPSyncRequest(sv *svv1alpha1.SharedVolume, timeout, targetPath string) (*SyncRequest, error) {
+	http := sv.Spec.Source.HTTP
+
+	return &SyncRequest{
+		Source: SyncSource{
+			Type: "http",
+			Details: SyncSourceHTTP{
+				URL: http.URL,
+			},
+		},
+		Target: SyncTarget{
+			Path: targetPath,
+		},
+		Timeout: timeout,
+	}, nil
+}
+
+// buildGitSyncRequest builds sync request for Git source
+func (s *SyncController) buildGitSyncRequest(sv *svv1alpha1.SharedVolume, timeout, targetPath string) (*SyncRequest, error) {
+	git := sv.Spec.Source.Git
+
+	return &SyncRequest{
+		Source: SyncSource{
+			Type: "git",
+			Details: SyncSourceGit{
+				URL:        git.URL,
+				Username:   git.User,
+				Password:   git.Password,
+				PrivateKey: git.PrivateKey,
+				Branch:     git.Branch,
+			},
+		},
+		Target: SyncTarget{
+			Path: targetPath,
+		},
+		Timeout: timeout,
+	}, nil
+}
+
+// buildS3SyncRequest builds sync request for S3 source
+func (s *SyncController) buildS3SyncRequest(sv *svv1alpha1.SharedVolume, timeout, targetPath string) (*SyncRequest, error) {
+	s3 := sv.Spec.Source.S3
+
+	return &SyncRequest{
+		Source: SyncSource{
+			Type: "s3",
+			Details: SyncSourceS3{
+				EndpointURL: s3.EndpointURL,
+				BucketName:  s3.BucketName,
+				Path:        s3.Path,
+				AccessKey:   s3.AccessKey,
+				SecretKey:   s3.SecretKey,
+				Region:      s3.Region,
 			},
 		},
 		Target: SyncTarget{
@@ -368,7 +473,7 @@ func (s *SyncController) RecoverSyncOperations(ctx context.Context) error {
 	recoveredCount := 0
 	for _, sv := range sharedVolumeList.Items {
 		// Skip if not ready or no source configured
-		if sv.Status.Phase != "Ready" || sv.Spec.Source == nil || sv.Spec.Source.SSH == nil {
+		if sv.Status.Phase != "Ready" || !s.hasValidSource(&sv) {
 			continue
 		}
 
