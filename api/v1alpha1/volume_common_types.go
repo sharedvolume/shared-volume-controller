@@ -28,6 +28,7 @@ type SSHSourceSpec struct {
 	PrivateKey           string             `json:"privateKey,omitempty"`
 	Path                 string             `json:"path,omitempty"`
 	PrivateKeyFromSecret *SecretKeySelector `json:"privateKeyFromSecret,omitempty"`
+	PasswordFromSecret   *SecretKeySelector `json:"passwordFromSecret,omitempty"`
 }
 
 // HTTPSourceSpec defines HTTP source configuration.
@@ -37,26 +38,31 @@ type HTTPSourceSpec struct {
 
 // GitSourceSpec defines Git source configuration.
 type GitSourceSpec struct {
-	URL        string `json:"url"`
-	User       string `json:"user,omitempty"`
-	Password   string `json:"password,omitempty"`
-	PrivateKey string `json:"privateKey,omitempty"`
-	Branch     string `json:"branch,omitempty"`
+	URL                  string             `json:"url"`
+	User                 string             `json:"user,omitempty"`
+	Password             string             `json:"password,omitempty"`
+	PrivateKey           string             `json:"privateKey,omitempty"`
+	Branch               string             `json:"branch,omitempty"`
+	PrivateKeyFromSecret *SecretKeySelector `json:"privateKeyFromSecret,omitempty"`
+	PasswordFromSecret   *SecretKeySelector `json:"passwordFromSecret,omitempty"`
 }
 
 // S3SourceSpec defines S3 source configuration.
 type S3SourceSpec struct {
-	EndpointURL string `json:"endpointUrl"`
-	BucketName  string `json:"bucketName"`
-	Path        string `json:"path,omitempty"`
-	AccessKey   string `json:"accessKey"`
-	SecretKey   string `json:"secretKey"`
-	Region      string `json:"region"`
+	EndpointURL         string             `json:"endpointUrl"`
+	BucketName          string             `json:"bucketName"`
+	Path                string             `json:"path,omitempty"`
+	AccessKey           string             `json:"accessKey,omitempty"`
+	SecretKey           string             `json:"secretKey,omitempty"`
+	Region              string             `json:"region"`
+	AccessKeyFromSecret *SecretKeySelector `json:"accessKeyFromSecret,omitempty"`
+	SecretKeyFromSecret *SecretKeySelector `json:"secretKeyFromSecret,omitempty"`
 }
 
 type SecretKeySelector struct {
-	Name string `json:"name"`
-	Key  string `json:"key"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"` // Optional for SharedVolume, required for ClusterSharedVolume
+	Key       string `json:"key"`
 }
 
 // VolumeSourceSpec defines the source for the shared volume.

@@ -1,0 +1,186 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: this-name-is-longer-than-25-characters-and-should-fail
+spec:
+  storage:
+    capacity: "1Gi"
+    storageClassName: "standard"
+    accessModes:
+      - ReadWriteMany
+  mountPath: "/shared-data"
+---
+# Test 1: Valid ClusterSharedVolume with Git source using secret with namespace
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: valid-csv-git
+spec:
+  storage:
+    capacity: "1Gi"
+    storageClassName: "standard"
+    accessModes:
+      - ReadWriteMany
+  mountPath: "/shared-data"
+  syncInterval: "5m"
+  syncTimeout: "2m"
+  source:
+    git:
+      url: "https://github.com/example/repo.git"
+      branch: "main"
+      privateKeyFromSecret:
+        name: "git-secret"
+        namespace: "default"
+        key: "private-key"
+---
+# Test 2: ClusterSharedVolume with SSH source using secret with namespace
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: valid-csv-ssh
+spec:
+  mountPath: "/shared-data"
+  source:
+    ssh:
+      host: "example.com"
+      path: "/data"
+      passwordFromSecret:
+        name: "ssh-password"
+        namespace: "secrets"
+        key: "password"
+---
+# Test 3: ClusterSharedVolume with S3 source using secrets with namespace
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: valid-csv-s3
+spec:
+  mountPath: "/shared-data"
+  source:
+    s3:
+      endpointUrl: "https://s3.amazonaws.com"
+      bucketName: "my-bucket"
+      region: "us-east-1"
+      accessKeyFromSecret:
+        name: "s3-credentials"
+        namespace: "secrets"
+        key: "access-key"
+      secretKeyFromSecret:
+        name: "s3-credentials"
+        namespace: "secrets"
+        key: "secret-key"
+---
+# Test 4: SharedVolume with Git source using namespace secret (no namespace field needed)
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: valid-sv-git
+  namespace: default
+spec:
+  mountPath: "/shared-data"
+  source:
+    git:
+      url: "https://github.com/example/repo.git"
+      passwordFromSecret:
+        name: "git-auth"
+        key: "password"
+---
+# Test 5: SharedVolume with SSH source using namespace secret (no namespace field needed)
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: valid-sv-ssh
+  namespace: default
+spec:
+  mountPath: "/shared-data"
+  source:
+    ssh:
+      host: "example.com"
+      path: "/data"
+      privateKeyFromSecret:
+        name: "ssh-key"
+        key: "private-key"
+---
+# Test 6: SharedVolume with S3 source using namespace secrets (no namespace field needed)
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: valid-sv-s3
+  namespace: default
+spec:
+  mountPath: "/shared-data"
+  source:
+    s3:
+      endpointUrl: "https://s3.amazonaws.com"
+      bucketName: "my-bucket"
+      region: "us-east-1"
+      accessKeyFromSecret:
+        name: "s3-creds"
+        key: "access-key"
+      secretKeyFromSecret:
+        name: "s3-creds"
+        key: "secret-key"
+---
+# Test 7: Invalid - Multiple authentication sources for SSH (should fail)
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: invalid-multi-ssh
+  namespace: default
+spec:
+  mountPath: "/shared-data"
+  source:
+    ssh:
+      host: "example.com"
+      path: "/data"
+      password: "direct-password"
+      passwordFromSecret:
+        name: "ssh-secret"
+        key: "password"
+---
+# Test 8: Invalid - ClusterSharedVolume missing namespace in secret (should fail)
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: invalid-cluster-secret
+spec:
+  mountPath: "/shared-data"
+  source:
+    ssh:
+      host: "example.com"
+      path: "/data"
+      passwordFromSecret:
+        name: "ssh-password"
+        key: "password"
+        # Missing required namespace field for cluster-scoped resource
+---
+# Test 9: Invalid - Missing required S3 credentials (should fail)
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: invalid-s3-creds
+  namespace: default
+spec:
+  mountPath: "/shared-data"
+  source:
+    s3:
+      endpointUrl: "https://s3.amazonaws.com"
+      bucketName: "my-bucket"
+      region: "us-east-1"
+      # Missing both accessKey and accessKeyFromSecret
+---
+# Test 10: Invalid - Multiple Git authentication methods (should fail)  
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: invalid-multi-git
+spec:
+  mountPath: "/shared-data"
+  source:
+    git:
+      url: "https://github.com/example/repo.git"
+      privateKey: "direct-key"
+      privateKeyFromSecret:
+        name: "git-key"
+        namespace: "secrets"
+        key: "private-key"

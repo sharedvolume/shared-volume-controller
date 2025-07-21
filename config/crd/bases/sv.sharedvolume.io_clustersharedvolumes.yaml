@@ -81,11 +81,117 @@ spec:
               source:
                 description: VolumeSourceSpec defines the source for the shared volume.
                 properties:
+                  git:
+                    description: GitSourceSpec defines Git source configuration.
+                    properties:
+                      branch:
+                        type: string
+                      password:
+                        type: string
+                      passwordFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      privateKey:
+                        type: string
+                      privateKeyFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      url:
+                        type: string
+                      user:
+                        type: string
+                    required:
+                    - url
+                    type: object
+                  http:
+                    description: HTTPSourceSpec defines HTTP source configuration.
+                    properties:
+                      url:
+                        type: string
+                    required:
+                    - url
+                    type: object
+                  s3:
+                    description: S3SourceSpec defines S3 source configuration.
+                    properties:
+                      accessKey:
+                        type: string
+                      accessKeyFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      bucketName:
+                        type: string
+                      endpointUrl:
+                        type: string
+                      path:
+                        type: string
+                      region:
+                        type: string
+                      secretKey:
+                        type: string
+                      secretKeyFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    required:
+                    - bucketName
+                    - endpointUrl
+                    - region
+                    type: object
                   ssh:
                     description: SSHSourceSpec defines SSH source configuration.
                     properties:
                       host:
                         type: string
+                      password:
+                        type: string
+                      passwordFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
                       path:
                         type: string
                       port:
@@ -98,11 +204,13 @@ spec:
                             type: string
                           name:
                             type: string
+                          namespace:
+                            type: string
                         required:
                         - key
                         - name
                         type: object
-                      username:
+                      user:
                         type: string
                     required:
                     - host

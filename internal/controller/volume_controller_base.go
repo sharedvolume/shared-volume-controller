@@ -791,7 +791,7 @@ func (r *VolumeControllerBase) ReconcileReplicaSet(ctx context.Context, volumeOb
 					InitContainers: []corev1.Container{
 						{
 							Name:  "setup-folders",
-							Image: "sharedvolume/volume-syncer:0.0.2",
+							Image: "sharedvolume/volume-syncer:0.0.5",
 							Command: []string{
 								"sh",
 								"-c", fmt.Sprintf("mkdir -p /nfs/%s-%s && echo 'sv-sample-file' > /nfs/%s-%s/.sv && echo 'Created folder /nfs/%s-%s with .sv file'",
@@ -810,7 +810,7 @@ func (r *VolumeControllerBase) ReconcileReplicaSet(ctx context.Context, volumeOb
 					Containers: []corev1.Container{
 						{
 							Name:  spec.ReferenceValue + "-syncer",
-							Image: "sharedvolume/volume-syncer:0.0.2",
+							Image: "sharedvolume/volume-syncer:0.0.5",
 							Ports: []corev1.ContainerPort{
 								{
 									ContainerPort: 8080,
@@ -967,8 +967,8 @@ func (b *VolumeControllerBase) CleanupResources(ctx context.Context, volume Volu
 	// 2. Delete ReplicaSet and any remaining pods
 	b.CleanupReplicaSet(ctx, volume, referenceValue)
 
-	// 3. Wait for pods to be fully terminated before deleting PVCs
-	b.WaitForPodsToTerminate(ctx, volume, referenceValue)
+	// 3. Aggressive cleanup mode - don't wait, force delete immediately
+	b.ForceCleanupAllResources(ctx, volume, referenceValue)
 
 	// 4. Delete Service
 	b.CleanupService(ctx, volume, referenceValue)
@@ -1372,8 +1372,10 @@ func (b *VolumeControllerBase) ForceDeletePod(ctx context.Context, pod *corev1.P
 		return err
 	}
 
+	// Wait a short time for normal deletion to complete
+	time.Sleep(500 * time.Millisecond) // Reduced from 2 seconds
+
 	// Check if pod is stuck in terminating state due to finalizers
-	// Give it a moment to delete normally first
 	var updatedPod corev1.Pod
 	if err := b.Get(ctx, client.ObjectKeyFromObject(pod), &updatedPod); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -1397,6 +1399,25 @@ func (b *VolumeControllerBase) ForceDeletePod(ctx context.Context, pod *corev1.P
 			return err
 		}
 		log.Info("Successfully removed finalizers from pod", "name", pod.Name)
+	}
+
+	// If pod is still terminating after removing finalizers, force delete it
+	if updatedPod.DeletionTimestamp != nil {
+		log.Info("Pod still terminating, attempting force deletion",
+			"name", pod.Name, "namespace", pod.Namespace)
+
+		// Use force deletion with zero grace period
+		gracePeriod := int64(0)
+		deleteOptions := &client.DeleteOptions{
+			GracePeriodSeconds: &gracePeriod,
+		}
+
+		if err := b.Delete(ctx, &updatedPod, deleteOptions); err != nil {
+			log.Error(err, "Failed to force delete pod", "name", pod.Name)
+			return err
+		}
+
+		log.Info("Successfully initiated force deletion of pod", "name", pod.Name)
 	}
 
 	return nil
@@ -1535,7 +1556,7 @@ func (r *VolumeControllerBase) UpdateReadinessStatus(ctx context.Context, volume
 			"referenceID", spec.ReferenceValue,
 			"phase", phase)
 
-		// Call the ready callback if provided
+		// Always call the ready callback when volume is ready to ensure sync configuration changes are picked up
 		if onReady != nil {
 			if err := onReady(ctx, volumeObj); err != nil {
 				log.Error(err, "Failed to execute ready callback")
@@ -1693,6 +1714,25 @@ func (r *VolumeControllerBase) ReconcileNfsServerComplete(ctx context.Context, v
 	// NFS server is ready, continue with resource reconciliation
 	if err := r.ReconcileRequiredResources(ctx, volumeObj, namespace); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Always update sync configuration if sync controller is available and volume is ready
+	if r.SyncController != nil && volumeObj.GetPhase() == "Ready" {
+		log := logf.FromContext(ctx)
+		// Check if this is a SharedVolume with valid source configuration
+		if sv, ok := volumeObj.(*svv1alpha1.SharedVolume); ok {
+			if err := r.SyncController.StartSyncForSharedVolume(ctx, sv); err != nil {
+				log.Error(err, "Failed to update sync configuration for SharedVolume")
+				// Don't return error, sync operations are not critical for resource readiness
+			}
+		}
+		// Add support for ClusterSharedVolume
+		if csv, ok := volumeObj.(*svv1alpha1.ClusterSharedVolume); ok {
+			if err := r.SyncController.StartSyncForClusterSharedVolume(ctx, csv); err != nil {
+				log.Error(err, "Failed to update sync configuration for ClusterSharedVolume")
+				// Don't return error, sync operations are not critical for resource readiness
+			}
+		}
 	}
 
 	// Check if the resources are ready
@@ -1882,9 +1922,10 @@ func (r *VolumeControllerBase) EnsureAPIVersionAndKind(obj client.Object, apiVer
 func (b *VolumeControllerBase) WaitForPodsToTerminate(ctx context.Context, volume VolumeObject, referenceValue string) {
 	log := logf.FromContext(ctx)
 
-	maxWaitTime := 60 * time.Second
-	pollInterval := 2 * time.Second
+	maxWaitTime := 15 * time.Second // Reduced from 60 seconds
+	pollInterval := 1 * time.Second // Reduced from 2 seconds
 	timeout := time.Now().Add(maxWaitTime)
+	forceDeleteTime := time.Now().Add(5 * time.Second) // Reduced from 30 seconds
 
 	for time.Now().Before(timeout) {
 		// Check for any remaining pods with the volume's label
@@ -1897,6 +1938,17 @@ func (b *VolumeControllerBase) WaitForPodsToTerminate(ctx context.Context, volum
 		if len(podList.Items) == 0 {
 			log.Info("All pods have terminated, proceeding with PVC cleanup", "referenceValue", referenceValue)
 			return
+		}
+
+		// After 30 seconds, force delete any remaining pods
+		if time.Now().After(forceDeleteTime) {
+			log.Info("Force deleting remaining pods to prevent deadlock", "referenceValue", referenceValue)
+			for _, pod := range podList.Items {
+				if err := b.ForceDeletePod(ctx, &pod); err != nil {
+					log.Error(err, "Failed to force delete pod", "name", pod.Name, "namespace", pod.Namespace)
+				}
+			}
+			forceDeleteTime = time.Now().Add(1 * time.Hour) // Don't force delete again
 		}
 
 		// Log remaining pods
@@ -1917,6 +1969,35 @@ func (b *VolumeControllerBase) WaitForPodsToTerminate(ctx context.Context, volum
 	log.Info("Timeout waiting for pods to terminate, proceeding with cleanup anyway", "referenceValue", referenceValue, "maxWaitTime", maxWaitTime)
 }
 
+// ForceCleanupAllResources immediately force deletes all remaining pods without waiting
+func (b *VolumeControllerBase) ForceCleanupAllResources(ctx context.Context, volume VolumeObject, referenceValue string) {
+	log := logf.FromContext(ctx)
+
+	// Immediately force delete any remaining pods with the volume's label
+	podList := &corev1.PodList{}
+	if err := b.List(ctx, podList, client.InNamespace(volume.GetNamespace()), client.MatchingLabels{"app": referenceValue}); err != nil {
+		log.Error(err, "Failed to list pods for immediate force cleanup", "referenceValue", referenceValue)
+		return
+	}
+
+	if len(podList.Items) > 0 {
+		log.Info("Force deleting all remaining pods immediately", "referenceValue", referenceValue, "podCount", len(podList.Items))
+		for _, pod := range podList.Items {
+			// Set grace period to 0 and remove finalizers immediately
+			pod.Finalizers = []string{}
+			if err := b.Update(ctx, &pod); err != nil {
+				log.Error(err, "Failed to remove finalizers from pod", "name", pod.Name, "namespace", pod.Namespace)
+			}
+
+			// Delete with zero grace period
+			if err := b.Delete(ctx, &pod, client.GracePeriodSeconds(0)); err != nil {
+				log.Error(err, "Failed to force delete pod with zero grace period", "name", pod.Name, "namespace", pod.Namespace)
+			}
+		}
+		log.Info("Completed immediate force deletion of all pods", "referenceValue", referenceValue)
+	}
+}
+
 // Generic callback creation functions
 
 // CreateSyncReadyCallback creates a generic callback for when volume is ready that handles sync operations
@@ -1924,16 +2005,18 @@ func (r *VolumeControllerBase) CreateSyncReadyCallback() func(context.Context, V
 	return func(ctx context.Context, volumeObj VolumeObject) error {
 		// Start sync operations if sync controller is available and source is configured
 		if r.SyncController != nil {
-			// Check if this is a SharedVolume with source configuration
-			if sv, ok := volumeObj.(*svv1alpha1.SharedVolume); ok && sv.Spec.Source != nil {
+			// Check if this is a SharedVolume with valid source configuration
+			if sv, ok := volumeObj.(*svv1alpha1.SharedVolume); ok {
 				if err := r.SyncController.StartSyncForSharedVolume(ctx, sv); err != nil {
 					return err
 				}
 			}
-			// Add support for other volume types here when needed
-			// if csv, ok := volumeObj.(*svv1alpha1.ClusterSharedVolume); ok && csv.Spec.Source != nil {
-			//     return r.SyncController.StartSyncForClusterSharedVolume(ctx, csv)
-			// }
+			// Add support for ClusterSharedVolume
+			if csv, ok := volumeObj.(*svv1alpha1.ClusterSharedVolume); ok {
+				if err := r.SyncController.StartSyncForClusterSharedVolume(ctx, csv); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	}
@@ -1948,10 +2031,10 @@ func (r *VolumeControllerBase) CreateSyncNotReadyCallback() func(context.Context
 			if sv, ok := volumeObj.(*svv1alpha1.SharedVolume); ok {
 				r.SyncController.StopSyncForSharedVolume(sv)
 			}
-			// Add support for other volume types here when needed
-			// if csv, ok := volumeObj.(*svv1alpha1.ClusterSharedVolume); ok {
-			//     r.SyncController.StopSyncForClusterSharedVolume(csv)
-			// }
+			// Add support for ClusterSharedVolume
+			if csv, ok := volumeObj.(*svv1alpha1.ClusterSharedVolume); ok {
+				r.SyncController.StopSyncForClusterSharedVolume(csv)
+			}
 		}
 		return nil
 	}

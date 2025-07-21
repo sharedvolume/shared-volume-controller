@@ -78,17 +78,21 @@ func (r *ClusterSharedVolumeReconciler) Reconcile(ctx context.Context, req ctrl.
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ClusterSharedVolumeReconciler) SetupWithManager(mgr ctrl.Manager, controllerNamespace string) error {
-	// Create sync controller setup hook using the generic pattern
-	preSetupHook := r.VolumeControllerBase.CreateSyncControllerSetupHook(
-		NewSyncController, // Sync controller factory function
-		func(ctx context.Context) error {
-			// Recovery function for sync operations
-			if r.VolumeControllerBase.SyncController != nil {
-				return r.VolumeControllerBase.SyncController.RecoverSyncOperations(ctx)
-			}
-			return nil
-		},
-	)
+	var preSetupHook func(ctrl.Manager, *VolumeControllerBase) error
+
+	// Only create sync controller setup hook if we don't already have one
+	if r.VolumeControllerBase.SyncController == nil {
+		preSetupHook = r.VolumeControllerBase.CreateSyncControllerSetupHook(
+			NewSyncController, // Sync controller factory function
+			func(ctx context.Context) error {
+				// Recovery function for sync operations
+				if r.VolumeControllerBase.SyncController != nil {
+					return r.VolumeControllerBase.SyncController.RecoverSyncOperations(ctx)
+				}
+				return nil
+			},
+		)
+	}
 
 	// Use the fully generic controller setup pattern
 	return r.VolumeControllerBase.SetupGenericController(mgr, ControllerSetupConfig{

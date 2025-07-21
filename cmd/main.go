@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -210,15 +211,27 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create a shared sync controller to prevent double recovery operations
+	sharedSyncController := controller.NewSyncController(mgr.GetClient(), mgr.GetScheme())
+
+	// Add a single recovery runnable for the shared sync controller
+	recovery := controller.NewOneTimeRecoveryRunnable("sync-recovery", func(ctx context.Context) error {
+		return sharedSyncController.RecoverSyncOperations(ctx)
+	}, true)
+	if err := mgr.Add(recovery); err != nil {
+		setupLog.Error(err, "unable to add sync recovery runnable")
+		os.Exit(1)
+	}
+
 	if err := (&controller.SharedVolumeReconciler{
-		VolumeControllerBase: controller.NewVolumeControllerBase(mgr.GetClient(), mgr.GetScheme(), controllerNamespace, nil),
+		VolumeControllerBase: controller.NewVolumeControllerBase(mgr.GetClient(), mgr.GetScheme(), controllerNamespace, sharedSyncController),
 	}).SetupWithManager(mgr, controllerNamespace); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SharedVolume")
 		os.Exit(1)
 	}
 
 	if err := (&controller.ClusterSharedVolumeReconciler{
-		VolumeControllerBase: controller.NewVolumeControllerBase(mgr.GetClient(), mgr.GetScheme(), controllerNamespace, nil),
+		VolumeControllerBase: controller.NewVolumeControllerBase(mgr.GetClient(), mgr.GetScheme(), controllerNamespace, sharedSyncController),
 	}).SetupWithManager(mgr, controllerNamespace); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ClusterSharedVolume")
 		os.Exit(1)
@@ -233,15 +246,19 @@ func main() {
 	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1alpha1.SetupSharedVolumeWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "SharedVolume")
+		// Setup Pod webhook
+		if err := webhookv1.SetupPodWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "Pod")
 			os.Exit(1)
 		}
-	}
-	// nolint:goconst
-	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1.SetupCronJobWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "CronJob")
+		// Setup ClusterSharedVolume webhook
+		if err := webhookv1alpha1.SetupClusterSharedVolumeWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "ClusterSharedVolume")
+			os.Exit(1)
+		}
+		// Setup SharedVolume webhook
+		if err := webhookv1alpha1.SetupSharedVolumeWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "SharedVolume")
 			os.Exit(1)
 		}
 	}

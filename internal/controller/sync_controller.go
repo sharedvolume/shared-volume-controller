@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -123,24 +124,15 @@ func (s *SyncController) StartSyncForSharedVolume(ctx context.Context, sv *svv1a
 	if sv.Status.Phase != "Ready" || !s.hasValidSource(sv) {
 		log.Info("SharedVolume not ready for sync or source not configured",
 			"name", sv.Name, "namespace", sv.Namespace, "phase", sv.Status.Phase)
+		// Stop any existing sync operations if not ready or source not configured
+		s.StopSyncForSharedVolume(sv)
 		return nil
 	}
 
-	key := fmt.Sprintf("%s/%s", sv.Namespace, sv.Name)
+	// Always stop existing sync operations first to ensure configuration changes are picked up
+	s.StopSyncForSharedVolume(sv)
 
-	// Check if sync is already running for this SharedVolume
-	s.mutex.RLock()
-	_, alreadyRunning := s.syncTimers[key]
-	initialSyncDone := s.initialSyncDone[key]
-	s.mutex.RUnlock()
-
-	if alreadyRunning {
-		log.Info("Sync already running for SharedVolume", "name", sv.Name, "namespace", sv.Namespace)
-		return nil
-	}
-
-	// Stop existing timer if any (safety check)
-	s.stopSyncTimer(key)
+	log.Info("Restarting sync operations with updated configuration", "name", sv.Name, "namespace", sv.Namespace)
 
 	// Parse sync interval
 	interval, err := time.ParseDuration(sv.Spec.SyncInterval)
@@ -149,38 +141,56 @@ func (s *SyncController) StartSyncForSharedVolume(ctx context.Context, sv *svv1a
 		return err
 	}
 
-	log.Info("Starting sync operations for SharedVolume",
-		"name", sv.Name, "namespace", sv.Namespace, "interval", interval, "initialSyncDone", initialSyncDone)
-
-	// For recovery scenarios, we don't trigger initial sync immediately
-	// Instead, we wait for the first interval to pass, then start syncing
-	// This prevents thundering herd problems on controller restart
-	if !initialSyncDone {
-		// Mark initial sync as done to prevent duplicate initial syncs
-		s.mutex.Lock()
-		s.initialSyncDone[key] = true
-		s.mutex.Unlock()
-	}
-
-	// Schedule periodic sync (first sync will happen after the interval)
-	timer := time.AfterFunc(interval, func() {
-		s.scheduledSync(sv.DeepCopy(), interval)
-	})
-
-	s.mutex.Lock()
-	s.syncTimers[key] = timer
-	s.mutex.Unlock()
-
-	log.Info("Started sync for SharedVolume",
-		"name", sv.Name, "namespace", sv.Namespace, "interval", interval)
-
-	return nil
+	// Start sync operations with the updated configuration
+	return s.startSyncCommon(sv.Name, sv.Namespace, sv.Spec.VolumeSpecBase, interval)
 }
 
 // StopSyncForSharedVolume stops sync operations for a SharedVolume
 func (s *SyncController) StopSyncForSharedVolume(sv *svv1alpha1.SharedVolume) {
 	key := fmt.Sprintf("%s/%s", sv.Namespace, sv.Name)
 	s.stopSyncTimer(key)
+}
+
+// StartSyncForClusterSharedVolume starts sync operations for a ClusterSharedVolume
+func (s *SyncController) StartSyncForClusterSharedVolume(ctx context.Context, csv *svv1alpha1.ClusterSharedVolume) error {
+	log := logf.FromContext(ctx).WithName(SyncControllerName)
+
+	// Check if sync is enabled and source is configured
+	if !s.hasValidSourceCSV(csv) {
+		log.Info("No valid source configured for ClusterSharedVolume, skipping sync", "name", csv.Name)
+		// Stop any existing sync operations if source is no longer configured
+		s.StopSyncForClusterSharedVolume(csv)
+		return nil
+	}
+
+	// Parse sync interval
+	interval, err := time.ParseDuration(csv.Spec.SyncInterval)
+	if err != nil {
+		return fmt.Errorf("invalid sync interval: %w", err)
+	}
+
+	// Always stop existing sync operations first to ensure configuration changes are picked up
+	s.StopSyncForClusterSharedVolume(csv)
+
+	log.Info("Restarting sync operations with updated configuration", "name", csv.Name, "namespace", csv.Spec.ResourceNamespace)
+
+	// Start sync operations with the updated configuration
+	return s.startSyncCommon(csv.Name, csv.Spec.ResourceNamespace, csv.Spec.VolumeSpecBase, interval)
+}
+
+// StopSyncForClusterSharedVolume stops sync operations for a ClusterSharedVolume
+func (s *SyncController) StopSyncForClusterSharedVolume(csv *svv1alpha1.ClusterSharedVolume) {
+	key := fmt.Sprintf("%s/%s", csv.Spec.ResourceNamespace, csv.Name)
+	s.stopSyncTimer(key)
+}
+
+// hasValidSourceCSV checks if ClusterSharedVolume has a valid source configuration
+func (s *SyncController) hasValidSourceCSV(csv *svv1alpha1.ClusterSharedVolume) bool {
+	if csv.Spec.Source == nil {
+		return false
+	}
+	// Check if at least one source type is configured
+	return csv.Spec.Source.SSH != nil || csv.Spec.Source.HTTP != nil || csv.Spec.Source.Git != nil || csv.Spec.Source.S3 != nil
 }
 
 // stopSyncTimer stops and removes a sync timer
@@ -194,6 +204,53 @@ func (s *SyncController) stopSyncTimer(key string) {
 	}
 	// Also clean up the initial sync tracking when stopping
 	delete(s.initialSyncDone, key)
+}
+
+// startSyncCommon handles the common logic for starting sync operations
+func (s *SyncController) startSyncCommon(name, namespace string, spec svv1alpha1.VolumeSpecBase, interval time.Duration) error {
+	log := logf.FromContext(context.Background()).WithName(SyncControllerName)
+	key := fmt.Sprintf("%s/%s", namespace, name)
+
+	// Check if sync is already running
+	s.mutex.RLock()
+	_, alreadyRunning := s.syncTimers[key]
+	initialSyncDone := s.initialSyncDone[key]
+	s.mutex.RUnlock()
+
+	if alreadyRunning {
+		log.Info("Sync already running for volume", "name", name, "namespace", namespace)
+		return nil
+	}
+
+	// Stop existing timer if any (safety check)
+	s.stopSyncTimer(key)
+
+	log.Info("Starting sync operations for volume",
+		"name", name, "namespace", namespace, "interval", interval, "initialSyncDone", initialSyncDone)
+
+	// For recovery scenarios, we don't trigger initial sync immediately
+	// Instead, we wait for the first interval to pass, then start syncing
+	// This prevents thundering herd problems on controller restart
+	if !initialSyncDone {
+		// Mark initial sync as done to prevent duplicate initial syncs
+		s.mutex.Lock()
+		s.initialSyncDone[key] = true
+		s.mutex.Unlock()
+	}
+
+	// Schedule periodic sync (first sync will happen after the interval)
+	timer := time.AfterFunc(interval, func() {
+		s.scheduledSyncCommon(name, namespace, spec, interval)
+	})
+
+	s.mutex.Lock()
+	s.syncTimers[key] = timer
+	s.mutex.Unlock()
+
+	log.Info("Started sync for volume",
+		"name", name, "namespace", namespace, "interval", interval)
+
+	return nil
 }
 
 // scheduledSync handles periodic sync execution
@@ -243,6 +300,48 @@ func (s *SyncController) scheduledSync(sv *svv1alpha1.SharedVolume, interval tim
 	} else {
 		log.Info("Successfully completed scheduled sync",
 			"name", sv.Name, "namespace", sv.Namespace)
+	}
+}
+
+// scheduledSyncCommon handles periodic sync execution for any volume type
+func (s *SyncController) scheduledSyncCommon(name, namespace string, spec svv1alpha1.VolumeSpecBase, interval time.Duration) {
+	ctx := context.Background()
+	log := logf.FromContext(ctx).WithName(SyncControllerName)
+	key := fmt.Sprintf("%s/%s", namespace, name)
+
+	// Always schedule the next sync first, regardless of any errors that might occur
+	defer func() {
+		timer := time.AfterFunc(interval, func() {
+			s.scheduledSyncCommon(name, namespace, spec, interval)
+		})
+
+		s.mutex.Lock()
+		s.syncTimers[key] = timer
+		s.mutex.Unlock()
+
+		log.Info("Scheduled next sync",
+			"name", name, "namespace", namespace, "interval", interval)
+	}()
+
+	// Check if we have a valid source configured
+	if spec.Source == nil {
+		log.Info("No source configured for volume, skipping sync", "name", name, "namespace", namespace)
+		return
+	}
+
+	// Check if at least one source type is configured
+	if spec.Source.SSH == nil && spec.Source.HTTP == nil && spec.Source.Git == nil && spec.Source.S3 == nil {
+		log.Info("No valid source type configured for volume, skipping sync", "name", name, "namespace", namespace)
+		return
+	}
+
+	// Trigger sync - errors are logged but don't stop the scheduling
+	if err := s.triggerSyncCommon(ctx, name, namespace, spec); err != nil {
+		log.Error(err, "Failed to trigger scheduled sync, will retry at next interval",
+			"name", name, "namespace", namespace)
+	} else {
+		log.Info("Successfully completed scheduled sync",
+			"name", name, "namespace", namespace)
 	}
 }
 
@@ -297,6 +396,63 @@ func (s *SyncController) triggerSync(ctx context.Context, sv *svv1alpha1.SharedV
 
 	log.Info("Successfully triggered sync",
 		"name", sv.Name, "namespace", sv.Namespace, "url", url)
+
+	return nil
+}
+
+// triggerSyncCommon performs the actual sync API call for any volume type
+func (s *SyncController) triggerSyncCommon(ctx context.Context, name, namespace string, spec svv1alpha1.VolumeSpecBase) error {
+	log := logf.FromContext(ctx).WithName(SyncControllerName)
+
+	// Build sync request payload
+	syncReq, err := s.buildSyncRequestCommon(ctx, name, namespace, spec)
+	if err != nil {
+		return fmt.Errorf("failed to build sync request: %w", err)
+	}
+
+	// Marshal to JSON
+	payload, err := json.Marshal(syncReq)
+	if err != nil {
+		return fmt.Errorf("failed to marshal sync request: %w", err)
+	}
+
+	// Log the exact payload being sent for debugging
+	log.Info("Sending sync request",
+		"url", fmt.Sprintf("http://%s.%s.svc.cluster.local:8080/api/1.0/sync", spec.ReferenceValue, namespace),
+		"payload", string(payload),
+		"targetPath", syncReq.Target.Path,
+		"sourceType", syncReq.Source.Type,
+		"timeout", syncReq.Timeout)
+
+	// Build URL using Kubernetes service DNS format
+	url := fmt.Sprintf("http://%s.%s.svc.cluster.local:8080/api/1.0/sync", spec.ReferenceValue, namespace)
+
+	// Create HTTP request
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payload))
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	// Set required headers to match the working manual request
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+	// Don't set Host header manually - let Go handle it automatically
+
+	// Execute request
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to execute sync request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check response status - accept any 2xx status code
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("sync request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	log.Info("Sync request completed successfully",
+		"name", name, "namespace", namespace, "status", resp.StatusCode)
 
 	return nil
 }
@@ -459,7 +615,7 @@ func (s *SyncController) getPrivateKeyFromSecret(ctx context.Context, namespace 
 	return string(privateKeyBytes), nil
 }
 
-// RecoverSyncOperations starts sync operations for all existing ready SharedVolumes
+// RecoverSyncOperations starts sync operations for all existing ready SharedVolumes and ClusterSharedVolumes
 // This should be called when the controller starts to resume sync operations after pod restart
 func (s *SyncController) RecoverSyncOperations(ctx context.Context) error {
 	log := logf.FromContext(ctx).WithName(SyncControllerName)
@@ -490,6 +646,162 @@ func (s *SyncController) RecoverSyncOperations(ctx context.Context) error {
 			"name", sv.Name, "namespace", sv.Namespace)
 	}
 
-	log.Info("Completed sync recovery", "recoveredCount", recoveredCount, "totalSharedVolumes", len(sharedVolumeList.Items))
+	// List all ClusterSharedVolumes
+	var clusterSharedVolumeList svv1alpha1.ClusterSharedVolumeList
+	if err := s.List(ctx, &clusterSharedVolumeList); err != nil {
+		log.Error(err, "Failed to list ClusterSharedVolumes for sync recovery")
+		// Don't fail the entire recovery, continue with what we have
+	} else {
+		for _, csv := range clusterSharedVolumeList.Items {
+			// Skip if not ready or no source configured
+			if csv.Status.Phase != "Ready" || !s.hasValidSourceCSV(&csv) {
+				continue
+			}
+
+			// Start sync operations for this ClusterSharedVolume
+			if err := s.StartSyncForClusterSharedVolume(ctx, &csv); err != nil {
+				log.Error(err, "Failed to recover sync for ClusterSharedVolume",
+					"name", csv.Name)
+				// Continue with other ClusterSharedVolumes
+				continue
+			}
+
+			recoveredCount++
+			log.Info("Recovered sync operations for ClusterSharedVolume",
+				"name", csv.Name)
+		}
+	}
+
+	log.Info("Completed sync recovery",
+		"recoveredCount", recoveredCount,
+		"totalSharedVolumes", len(sharedVolumeList.Items),
+		"totalClusterSharedVolumes", len(clusterSharedVolumeList.Items))
 	return nil
+}
+
+// buildSyncRequestCommon builds the sync request payload from VolumeSpecBase
+func (s *SyncController) buildSyncRequestCommon(ctx context.Context, name, namespace string, spec svv1alpha1.VolumeSpecBase) (*SyncRequest, error) {
+	if spec.Source == nil {
+		return nil, fmt.Errorf("no source configured")
+	}
+
+	// Set default timeout if not specified
+	timeout := spec.SyncTimeout
+	if timeout == "" {
+		timeout = "120s"
+	}
+
+	// Build target path: /nfs/{name}-{namespace}
+	targetPath := fmt.Sprintf("/nfs/%s-%s", name, namespace)
+
+	// Handle different source types
+	if spec.Source.SSH != nil {
+		return s.buildSSHSyncRequestCommon(ctx, name, namespace, spec, timeout, targetPath)
+	} else if spec.Source.HTTP != nil {
+		return s.buildHTTPSyncRequestCommon(spec, timeout, targetPath)
+	} else if spec.Source.Git != nil {
+		return s.buildGitSyncRequestCommon(spec, timeout, targetPath)
+	} else if spec.Source.S3 != nil {
+		return s.buildS3SyncRequestCommon(spec, timeout, targetPath)
+	}
+
+	return nil, fmt.Errorf("no valid source type configured")
+}
+
+// buildSSHSyncRequestCommon builds sync request for SSH source from VolumeSpecBase
+func (s *SyncController) buildSSHSyncRequestCommon(ctx context.Context, name, namespace string, spec svv1alpha1.VolumeSpecBase, timeout, targetPath string) (*SyncRequest, error) {
+	ssh := spec.Source.SSH
+
+	// Get private key (could be direct or from secret)
+	privateKey := ssh.PrivateKey
+	if privateKey == "" && ssh.PrivateKeyFromSecret != nil {
+		// Read private key from secret
+		var err error
+		privateKey, err = s.getPrivateKeyFromSecret(ctx, namespace, ssh.PrivateKeyFromSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read private key from secret: %w", err)
+		}
+	}
+
+	if privateKey == "" {
+		return nil, fmt.Errorf("no private key available for SSH source")
+	}
+
+	// Build sync request with SSH source
+	return &SyncRequest{
+		Source: SyncSource{
+			Type: "ssh",
+			Details: SyncSourceSSH{
+				Username:   ssh.User,
+				Host:       ssh.Host,
+				Port:       ssh.Port,
+				Path:       ssh.Path,
+				PrivateKey: privateKey,
+			},
+		},
+		Target: SyncTarget{
+			Path: targetPath,
+		},
+		Timeout: timeout,
+	}, nil
+}
+
+// buildHTTPSyncRequestCommon builds sync request for HTTP source from VolumeSpecBase
+func (s *SyncController) buildHTTPSyncRequestCommon(spec svv1alpha1.VolumeSpecBase, timeout, targetPath string) (*SyncRequest, error) {
+	http := spec.Source.HTTP
+
+	return &SyncRequest{
+		Source: SyncSource{
+			Type: "http",
+			Details: SyncSourceHTTP{
+				URL: http.URL,
+			},
+		},
+		Target: SyncTarget{
+			Path: targetPath,
+		},
+		Timeout: timeout,
+	}, nil
+}
+
+// buildGitSyncRequestCommon builds sync request for Git source from VolumeSpecBase
+func (s *SyncController) buildGitSyncRequestCommon(spec svv1alpha1.VolumeSpecBase, timeout, targetPath string) (*SyncRequest, error) {
+	git := spec.Source.Git
+
+	return &SyncRequest{
+		Source: SyncSource{
+			Type: "git",
+			Details: SyncSourceGit{
+				URL:    git.URL,
+				Branch: git.Branch,
+			},
+		},
+		Target: SyncTarget{
+			Path: targetPath,
+		},
+		Timeout: timeout,
+	}, nil
+}
+
+// buildS3SyncRequestCommon builds sync request for S3 source from VolumeSpecBase
+func (s *SyncController) buildS3SyncRequestCommon(spec svv1alpha1.VolumeSpecBase, timeout, targetPath string) (*SyncRequest, error) {
+	s3 := spec.Source.S3
+
+	return &SyncRequest{
+		Source: SyncSource{
+			Type: "s3",
+			Details: SyncSourceS3{
+				BucketName:  s3.BucketName,
+				Path:        s3.Path,
+				Region:      s3.Region,
+				AccessKey:   s3.AccessKey,
+				SecretKey:   s3.SecretKey,
+				EndpointURL: s3.EndpointURL,
+			},
+		},
+		Target: SyncTarget{
+			Path: targetPath,
+		},
+		Timeout: timeout,
+	}, nil
 }
