@@ -1,0 +1,11 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: fail-name-too-long-csv-13-with-a-very-long-name-that-exceeds-kubernetes-dns-label-limits-which-should-be-rejected-by-validation
+spec:
+  mountPath: "{{MOUNT_PATH_FAIL_NAME}}"
+  syncInterval: "{{SYNC_INTERVAL_SHORT}}"
+  syncTimeout: "{{SYNC_TIMEOUT_SHORT}}"
+  storageClassName: "{{STORAGE_CLASS}}"
+  storage:
+    capacity: "{{STORAGE_CAPACITY_SMALL}}"

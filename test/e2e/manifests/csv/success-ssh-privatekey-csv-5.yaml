@@ -1,0 +1,17 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: success-ssh-privatekey-csv-5
+spec:
+  mountPath: "{{MOUNT_PATH_SSH_PRIVATEKEY}}"
+  syncInterval: "{{SYNC_INTERVAL_SHORT}}"
+  syncTimeout: "{{SYNC_TIMEOUT_SHORT}}"
+  storageClassName: "{{STORAGE_CLASS}}"
+  storage:
+    capacity: "{{STORAGE_CAPACITY_MEDIUM}}"
+  source:
+    ssh:
+      host: "{{SSH_HOST_KEY}}"
+      user: "{{SSH_USER_KEY}}"
+      privateKey: "{{B64_SSH_PRIVATE_KEY}}"
+      path: "{{SSH_PATH}}"

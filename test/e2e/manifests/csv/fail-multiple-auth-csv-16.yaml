@@ -1,0 +1,21 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: fail-multiple-auth-csv-16
+spec:
+  mountPath: "{{MOUNT_PATH_FAIL_MULTI_AUTH}}"
+  syncInterval: "{{SYNC_INTERVAL_SHORT}}"
+  syncTimeout: "{{SYNC_TIMEOUT_SHORT}}"
+  storageClassName: "{{STORAGE_CLASS}}"
+  storage:
+    capacity: "{{STORAGE_CAPACITY_SMALL}}"
+  source:
+    ssh:
+      host: "{{SSH_HOST}}"
+      user: "{{SSH_USER}}"
+      password: "{{SSH_PASSWORD}}"
+      passwordFromSecret:
+        name: ssh-auth
+        key: password
+        namespace: {{TEST_NAMESPACE_1}}
+      path: "{{SSH_PATH}}"

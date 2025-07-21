@@ -1,0 +1,19 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: success-s3-basic-sv-11
+  namespace: {{TEST_NAMESPACE_3}}
+spec:
+  mountPath: "{{MOUNT_PATH_S3_BASIC}}"
+  syncInterval: "{{SYNC_INTERVAL_SHORT}}"
+  syncTimeout: "{{SYNC_TIMEOUT_SHORT}}"
+  storageClassName: "{{STORAGE_CLASS}}"
+  storage:
+    capacity: "{{STORAGE_CAPACITY_LARGE}}"
+  source:
+    s3:
+      bucket: "{{S3_BUCKET}}"
+      region: "{{S3_REGION}}"
+      accessKey: "{{S3_ACCESS_KEY}}"
+      secretKey: "{{S3_SECRET_KEY}}"
+      path: "{{S3_PATH}}"

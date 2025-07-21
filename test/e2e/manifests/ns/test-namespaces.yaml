@@ -1,0 +1,25 @@
+# Test Namespaces
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{TEST_NAMESPACE_1}}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{TEST_NAMESPACE_2}}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{TEST_NAMESPACE_3}}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{TEST_NAMESPACE_4}}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{TEST_NAMESPACE_5}}

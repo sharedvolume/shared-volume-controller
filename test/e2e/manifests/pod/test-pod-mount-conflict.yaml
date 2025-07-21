@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod-mount-conflict
+  namespace: {{TEST_NAMESPACE_1}}
+  annotations:
+    sharedvolume.csv: "success-nosource-csv-1"
+    sharedvolume.sv: "success-nosource-sv-1"
+  labels:
+    app: conflict-test
+spec:
+  containers:
+  - name: alpine
+    image: alpine:3.18
+    command: ["/bin/sh", "-c", "while true; do echo 'Testing mount path conflicts (both volumes mount to same path)'; ls -la /opt/mnt/nosource; sleep 30; done"]
+    resources:
+      requests:
+        memory: "16Mi"
+        cpu: "100m"
+      limits:
+        memory: "32Mi"
+        cpu: "200m"
+  automountServiceAccountToken: false

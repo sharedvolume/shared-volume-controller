@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod-mixed-csv-sv
+  namespace: {{TEST_NAMESPACE_1}}
+  annotations:
+    sharedvolume.csv: "success-nosource-csv-1"
+    sharedvolume.sv: "success-ssh-basic-sv-2"
+  labels:
+    app: mixed-test
+spec:
+  containers:
+  - name: alpine
+    image: alpine:3.18
+    command: ["/bin/sh", "-c", "while true; do echo 'Testing mixed CSV+SV mounts'; ls -la /opt/mnt/nosource; ls -la /opt/mnt/ssh-basic; sleep 30; done"]
+    resources:
+      requests:
+        memory: "16Mi"
+        cpu: "100m"
+      limits:
+        memory: "32Mi"
+        cpu: "200m"
+  automountServiceAccountToken: false
