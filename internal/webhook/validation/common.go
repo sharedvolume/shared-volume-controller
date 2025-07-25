@@ -40,9 +40,11 @@ func ValidateVolumeSpec(spec *svv1alpha1.VolumeSpecBase, fldPath *field.Path, is
 		allErrs = append(allErrs, err...)
 	}
 
-	// Validate sync configuration
-	if err := validateSyncConfig(spec, fldPath); err != nil {
-		allErrs = append(allErrs, err...)
+	// Validate sync configuration (only if source is configured or sync fields are explicitly set)
+	if spec.Source != nil || spec.SyncInterval != "" || spec.SyncTimeout != "" {
+		if err := validateSyncConfig(spec, fldPath); err != nil {
+			allErrs = append(allErrs, err...)
+		}
 	}
 
 	return allErrs
@@ -273,11 +275,15 @@ func validateGitPasswordReferences(git *svv1alpha1.GitSourceSpec, fldPath *field
 	var allErrs field.ErrorList
 
 	passwordCount := 0
+	hasPassword := false
+
 	if git.Password != "" {
 		passwordCount++
+		hasPassword = true
 	}
 	if git.PasswordFromSecret != nil {
 		passwordCount++
+		hasPassword = true
 		if err := validateSecretKeySelector(git.PasswordFromSecret, fldPath.Child("passwordFromSecret"), isClusterScoped); err != nil {
 			allErrs = append(allErrs, err...)
 		}
@@ -285,6 +291,11 @@ func validateGitPasswordReferences(git *svv1alpha1.GitSourceSpec, fldPath *field
 
 	if passwordCount > 1 {
 		allErrs = append(allErrs, field.Invalid(fldPath, git, "only one of password or passwordFromSecret should be specified"))
+	}
+
+	// NEW VALIDATION: If password is provided, user must also be provided
+	if hasPassword && git.User == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("user"), "user is required when password is specified"))
 	}
 
 	return allErrs
@@ -374,6 +385,17 @@ func validateS3SecretKey(s3 *svv1alpha1.S3SourceSpec, fldPath *field.Path, isClu
 func validateSyncConfig(spec *svv1alpha1.VolumeSpecBase, fldPath *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
 
+	// Check if sync values are provided without a source
+	if spec.Source == nil && (spec.SyncInterval != "" || spec.SyncTimeout != "") {
+		if spec.SyncInterval != "" {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("syncInterval"), spec.SyncInterval, "syncInterval should not be set when no source is configured"))
+		}
+		if spec.SyncTimeout != "" {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("syncTimeout"), spec.SyncTimeout, "syncTimeout should not be set when no source is configured"))
+		}
+		return allErrs
+	}
+
 	if spec.SyncInterval == "" || spec.SyncTimeout == "" {
 		return allErrs
 	}
@@ -434,6 +456,11 @@ func validateSecretKeySelector(selector *svv1alpha1.SecretKeySelector, fldPath *
 	// For cluster-scoped resources, namespace is required
 	if isClusterScoped && selector.Namespace == "" {
 		allErrs = append(allErrs, field.Required(fldPath.Child("namespace"), "namespace is required for cluster-scoped resources"))
+	}
+
+	// For namespace-scoped resources (SharedVolume), namespace should not be specified
+	if !isClusterScoped && selector.Namespace != "" {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("namespace"), "namespace should not be specified for namespace-scoped resources, the resource's namespace will be used"))
 	}
 
 	return allErrs

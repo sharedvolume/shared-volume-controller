@@ -28,6 +28,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -55,7 +56,7 @@ type SyncSource struct {
 type SyncSourceSSH struct {
 	Host       string `json:"host"`
 	Port       int    `json:"port"`
-	Username   string `json:"username"`
+	User       string `json:"user"`
 	Path       string `json:"path"`
 	PrivateKey string `json:"privateKey"`
 }
@@ -66,7 +67,7 @@ type SyncSourceHTTP struct {
 
 type SyncSourceGit struct {
 	URL        string `json:"url"`
-	Username   string `json:"username,omitempty"`
+	User       string `json:"user,omitempty"`
 	Password   string `json:"password,omitempty"`
 	PrivateKey string `json:"privateKey,omitempty"`
 	Branch     string `json:"branch,omitempty"`
@@ -309,6 +310,39 @@ func (s *SyncController) scheduledSyncCommon(name, namespace string, spec svv1al
 	log := logf.FromContext(ctx).WithName(SyncControllerName)
 	key := fmt.Sprintf("%s/%s", namespace, name)
 
+	// Check if the volume still exists before scheduling next sync
+	// Try SharedVolume first, then ClusterSharedVolume
+	var volumeExists bool
+
+	// Check for SharedVolume
+	var sv svv1alpha1.SharedVolume
+	err := s.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sv)
+	if err == nil {
+		volumeExists = true
+	} else if apierrors.IsNotFound(err) {
+		// Check for ClusterSharedVolume
+		var csv svv1alpha1.ClusterSharedVolume
+		err = s.Get(ctx, types.NamespacedName{Name: name}, &csv)
+		if err == nil {
+			volumeExists = true
+		} else if apierrors.IsNotFound(err) {
+			volumeExists = false
+		} else {
+			log.Error(err, "Failed to check if ClusterSharedVolume exists", "name", name)
+			volumeExists = false
+		}
+	} else {
+		log.Error(err, "Failed to check if SharedVolume exists", "name", name, "namespace", namespace)
+		volumeExists = false
+	}
+
+	// If volume doesn't exist, stop sync operations and don't reschedule
+	if !volumeExists {
+		log.Info("Volume no longer exists, stopping sync operations", "name", name, "namespace", namespace)
+		s.stopSyncTimer(key)
+		return
+	}
+
 	// Always schedule the next sync first, regardless of any errors that might occur
 	defer func() {
 		timer := time.AfterFunc(interval, func() {
@@ -478,7 +512,7 @@ func (s *SyncController) buildSyncRequest(ctx context.Context, sv *svv1alpha1.Sh
 	} else if sv.Spec.Source.HTTP != nil {
 		return s.buildHTTPSyncRequest(sv, timeout, targetPath)
 	} else if sv.Spec.Source.Git != nil {
-		return s.buildGitSyncRequest(sv, timeout, targetPath)
+		return s.buildGitSyncRequest(ctx, sv, timeout, targetPath)
 	} else if sv.Spec.Source.S3 != nil {
 		return s.buildS3SyncRequest(sv, timeout, targetPath)
 	}
@@ -521,7 +555,7 @@ func (s *SyncController) buildSSHSyncRequest(ctx context.Context, sv *svv1alpha1
 			Details: SyncSourceSSH{
 				Host:       ssh.Host,
 				Port:       port,
-				Username:   ssh.User,
+				User:       ssh.User,
 				Path:       ssh.Path,
 				PrivateKey: privateKey,
 			},
@@ -552,17 +586,39 @@ func (s *SyncController) buildHTTPSyncRequest(sv *svv1alpha1.SharedVolume, timeo
 }
 
 // buildGitSyncRequest builds sync request for Git source
-func (s *SyncController) buildGitSyncRequest(sv *svv1alpha1.SharedVolume, timeout, targetPath string) (*SyncRequest, error) {
+func (s *SyncController) buildGitSyncRequest(ctx context.Context, sv *svv1alpha1.SharedVolume, timeout, targetPath string) (*SyncRequest, error) {
 	git := sv.Spec.Source.Git
+
+	// Get password (could be direct or from secret)
+	password := git.Password
+	if password == "" && git.PasswordFromSecret != nil {
+		var err error
+		// For SharedVolume, always use the SharedVolume's namespace for secrets
+		password, err = s.getSecretValue(ctx, sv.Namespace, git.PasswordFromSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read password from secret: %w", err)
+		}
+	}
+
+	// Get private key (could be direct or from secret)
+	privateKey := git.PrivateKey
+	if privateKey == "" && git.PrivateKeyFromSecret != nil {
+		var err error
+		// For SharedVolume, always use the SharedVolume's namespace for secrets
+		privateKey, err = s.getPrivateKeyFromSecret(ctx, sv.Namespace, git.PrivateKeyFromSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read private key from secret: %w", err)
+		}
+	}
 
 	return &SyncRequest{
 		Source: SyncSource{
 			Type: "git",
 			Details: SyncSourceGit{
 				URL:        git.URL,
-				Username:   git.User,
-				Password:   git.Password,
-				PrivateKey: git.PrivateKey,
+				User:       git.User,
+				Password:   password,
+				PrivateKey: privateKey,
 				Branch:     git.Branch,
 			},
 		},
@@ -613,6 +669,25 @@ func (s *SyncController) getPrivateKeyFromSecret(ctx context.Context, namespace 
 	}
 
 	return string(privateKeyBytes), nil
+}
+
+// getSecretValue reads a value from a Kubernetes secret
+func (s *SyncController) getSecretValue(ctx context.Context, namespace string, selector *svv1alpha1.SecretKeySelector) (string, error) {
+	var secret v1.Secret
+	err := s.Get(ctx, types.NamespacedName{
+		Name:      selector.Name,
+		Namespace: namespace,
+	}, &secret)
+	if err != nil {
+		return "", fmt.Errorf("failed to get secret %s/%s: %w", namespace, selector.Name, err)
+	}
+
+	valueBytes, exists := secret.Data[selector.Key]
+	if !exists {
+		return "", fmt.Errorf("key %s not found in secret %s/%s", selector.Key, namespace, selector.Name)
+	}
+
+	return string(valueBytes), nil
 }
 
 // RecoverSyncOperations starts sync operations for all existing ready SharedVolumes and ClusterSharedVolumes
@@ -700,7 +775,7 @@ func (s *SyncController) buildSyncRequestCommon(ctx context.Context, name, names
 	} else if spec.Source.HTTP != nil {
 		return s.buildHTTPSyncRequestCommon(spec, timeout, targetPath)
 	} else if spec.Source.Git != nil {
-		return s.buildGitSyncRequestCommon(spec, timeout, targetPath)
+		return s.buildGitSyncRequestCommon(ctx, name, namespace, spec, timeout, targetPath)
 	} else if spec.Source.S3 != nil {
 		return s.buildS3SyncRequestCommon(spec, timeout, targetPath)
 	}
@@ -717,14 +792,32 @@ func (s *SyncController) buildSSHSyncRequestCommon(ctx context.Context, name, na
 	if privateKey == "" && ssh.PrivateKeyFromSecret != nil {
 		// Read private key from secret
 		var err error
-		privateKey, err = s.getPrivateKeyFromSecret(ctx, namespace, ssh.PrivateKeyFromSecret)
+		secretNamespace := ssh.PrivateKeyFromSecret.Namespace
+		if secretNamespace == "" {
+			secretNamespace = namespace // fallback to resource namespace
+		}
+		privateKey, err = s.getPrivateKeyFromSecret(ctx, secretNamespace, ssh.PrivateKeyFromSecret)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read private key from secret: %w", err)
 		}
 	}
 
-	if privateKey == "" {
-		return nil, fmt.Errorf("no private key available for SSH source")
+	// Get password (could be direct or from secret)
+	password := ssh.Password
+	if password == "" && ssh.PasswordFromSecret != nil {
+		var err error
+		secretNamespace := ssh.PasswordFromSecret.Namespace
+		if secretNamespace == "" {
+			secretNamespace = namespace // fallback to resource namespace
+		}
+		password, err = s.getSecretValue(ctx, secretNamespace, ssh.PasswordFromSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read password from secret: %w", err)
+		}
+	}
+
+	if privateKey == "" && password == "" {
+		return nil, fmt.Errorf("either private key or password must be provided for SSH source")
 	}
 
 	// Build sync request with SSH source
@@ -732,7 +825,7 @@ func (s *SyncController) buildSSHSyncRequestCommon(ctx context.Context, name, na
 		Source: SyncSource{
 			Type: "ssh",
 			Details: SyncSourceSSH{
-				Username:   ssh.User,
+				User:       ssh.User,
 				Host:       ssh.Host,
 				Port:       ssh.Port,
 				Path:       ssh.Path,
@@ -765,15 +858,46 @@ func (s *SyncController) buildHTTPSyncRequestCommon(spec svv1alpha1.VolumeSpecBa
 }
 
 // buildGitSyncRequestCommon builds sync request for Git source from VolumeSpecBase
-func (s *SyncController) buildGitSyncRequestCommon(spec svv1alpha1.VolumeSpecBase, timeout, targetPath string) (*SyncRequest, error) {
+func (s *SyncController) buildGitSyncRequestCommon(ctx context.Context, name, namespace string, spec svv1alpha1.VolumeSpecBase, timeout, targetPath string) (*SyncRequest, error) {
 	git := spec.Source.Git
+
+	// Get password (could be direct or from secret)
+	password := git.Password
+	if password == "" && git.PasswordFromSecret != nil {
+		var err error
+		secretNamespace := git.PasswordFromSecret.Namespace
+		if secretNamespace == "" {
+			secretNamespace = namespace // fallback to resource namespace
+		}
+		password, err = s.getSecretValue(ctx, secretNamespace, git.PasswordFromSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read password from secret: %w", err)
+		}
+	}
+
+	// Get private key (could be direct or from secret)
+	privateKey := git.PrivateKey
+	if privateKey == "" && git.PrivateKeyFromSecret != nil {
+		var err error
+		secretNamespace := git.PrivateKeyFromSecret.Namespace
+		if secretNamespace == "" {
+			secretNamespace = namespace // fallback to resource namespace
+		}
+		privateKey, err = s.getPrivateKeyFromSecret(ctx, secretNamespace, git.PrivateKeyFromSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read private key from secret: %w", err)
+		}
+	}
 
 	return &SyncRequest{
 		Source: SyncSource{
 			Type: "git",
 			Details: SyncSourceGit{
-				URL:    git.URL,
-				Branch: git.Branch,
+				URL:        git.URL,
+				User:       git.User,
+				Password:   password,
+				PrivateKey: privateKey,
+				Branch:     git.Branch,
 			},
 		},
 		Target: SyncTarget{

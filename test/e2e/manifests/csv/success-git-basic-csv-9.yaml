@@ -14,4 +14,3 @@ spec:
       url: "{{GIT_REPO}}"
       branch: "{{GIT_BRANCH}}"
       password: "{{GIT_TOKEN}}"
-      path: "{{GIT_PATH}}"

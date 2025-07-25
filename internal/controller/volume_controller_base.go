@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -108,11 +109,14 @@ func (r *VolumeControllerBase) FillAndValidateSpec(volumeObj VolumeObject, gener
 	if spec.MountPath == "" {
 		return errors.New("mountPath is required in volume spec")
 	}
-	if spec.SyncInterval == "" {
-		spec.SyncInterval = "60s"
-	}
-	if spec.SyncTimeout == "" {
-		spec.SyncTimeout = "120s"
+	// Only set sync defaults if a source is configured
+	if spec.Source != nil {
+		if spec.SyncInterval == "" {
+			spec.SyncInterval = "60s"
+		}
+		if spec.SyncTimeout == "" {
+			spec.SyncTimeout = "120s"
+		}
 	}
 	if spec.Storage == nil {
 		return errors.New("storage is required in volume spec")
@@ -791,7 +795,7 @@ func (r *VolumeControllerBase) ReconcileReplicaSet(ctx context.Context, volumeOb
 					InitContainers: []corev1.Container{
 						{
 							Name:  "setup-folders",
-							Image: "sharedvolume/volume-syncer:0.0.5",
+							Image: "sharedvolume/volume-syncer:0.0.8",
 							Command: []string{
 								"sh",
 								"-c", fmt.Sprintf("mkdir -p /nfs/%s-%s && echo 'sv-sample-file' > /nfs/%s-%s/.sv && echo 'Created folder /nfs/%s-%s with .sv file'",
@@ -810,7 +814,7 @@ func (r *VolumeControllerBase) ReconcileReplicaSet(ctx context.Context, volumeOb
 					Containers: []corev1.Container{
 						{
 							Name:  spec.ReferenceValue + "-syncer",
-							Image: "sharedvolume/volume-syncer:0.0.5",
+							Image: "sharedvolume/volume-syncer:0.0.8",
 							Ports: []corev1.ContainerPort{
 								{
 									ContainerPort: 8080,
@@ -948,9 +952,43 @@ func (r *VolumeControllerBase) ReconcileService(ctx context.Context, volumeObj V
 func (b *VolumeControllerBase) CleanupResources(ctx context.Context, volume VolumeObject) error {
 	log := logf.FromContext(ctx)
 
-	// Stop sync operations first - this should be handled by the specific controller
-	// since sync operations are volume-type specific
-	// The specific controller should call the appropriate sync stop method
+	// Determine the operational namespace based on volume type
+	var operationalNamespace string
+
+	// Check if this is a ClusterSharedVolume (cluster-scoped resource)
+	if csv, ok := volume.(*svv1alpha1.ClusterSharedVolume); ok {
+		// For ClusterSharedVolume, resources are created in the controller namespace
+		operationalNamespace = "shared-volume-controller" // ClusterSharedVolumeOperationNamespace
+		log.Info("Detected ClusterSharedVolume, using controller namespace for cleanup",
+			"volumeName", csv.GetName(),
+			"operationalNamespace", operationalNamespace)
+	} else {
+		// For SharedVolume (namespaced resource), use the volume's namespace
+		operationalNamespace = volume.GetNamespace()
+		log.Info("Detected SharedVolume, using volume namespace for cleanup",
+			"volumeName", volume.GetName(),
+			"operationalNamespace", operationalNamespace)
+	}
+
+	return b.CleanupResourcesInNamespace(ctx, volume, operationalNamespace)
+}
+
+// CleanupResourcesInNamespace removes all resources associated with a volume in the specified namespace
+func (b *VolumeControllerBase) CleanupResourcesInNamespace(ctx context.Context, volume VolumeObject, operationalNamespace string) error {
+	log := logf.FromContext(ctx)
+
+	// Stop sync operations first to prevent accessing services that will be deleted
+	if b.SyncController != nil {
+		log.Info("Stopping sync operations for volume", "name", volume.GetName())
+		// Check if this is a SharedVolume
+		if sv, ok := volume.(*svv1alpha1.SharedVolume); ok {
+			b.SyncController.StopSyncForSharedVolume(sv)
+		}
+		// Check if this is a ClusterSharedVolume
+		if csv, ok := volume.(*svv1alpha1.ClusterSharedVolume); ok {
+			b.SyncController.StopSyncForClusterSharedVolume(csv)
+		}
+	}
 
 	spec := volume.GetVolumeSpec()
 	if spec.ReferenceValue == "" {
@@ -959,28 +997,31 @@ func (b *VolumeControllerBase) CleanupResources(ctx context.Context, volume Volu
 
 	referenceValue := spec.ReferenceValue
 
-	log.Info("Starting comprehensive cleanup for volume", "name", volume.GetName(), "referenceValue", referenceValue)
+	log.Info("Starting comprehensive cleanup for volume", "name", volume.GetName(), "referenceValue", referenceValue, "operationalNamespace", operationalNamespace)
 
 	// 1. Find and force delete ALL pods that use this volume (not just ReplicaSet pods)
-	b.CleanupAllPodsUsingVolume(ctx, volume)
+	b.CleanupAllPodsUsingVolumeInNamespace(ctx, volume, operationalNamespace)
 
 	// 2. Delete ReplicaSet and any remaining pods
-	b.CleanupReplicaSet(ctx, volume, referenceValue)
+	b.CleanupReplicaSetInNamespace(ctx, volume, referenceValue, operationalNamespace)
 
 	// 3. Aggressive cleanup mode - don't wait, force delete immediately
-	b.ForceCleanupAllResources(ctx, volume, referenceValue)
+	b.ForceCleanupAllResourcesInNamespace(ctx, volume, referenceValue, operationalNamespace)
 
-	// 4. Delete Service
-	b.CleanupService(ctx, volume, referenceValue)
+	// 4. Delete all PVCs related to this volume (both main and namespace-specific ones)
+	// PVCs should be deleted first to allow CSI driver to properly unmount volumes
+	b.CleanupAllPVCsInNamespace(ctx, volume, referenceValue, operationalNamespace)
 
-	// 5. Delete all PVCs related to this volume (both main and namespace-specific ones)
-	b.CleanupAllPVCs(ctx, volume, referenceValue)
+	// 5. Delete all PVs related to this volume (both main and namespace-specific ones)
+	// IMPORTANT: Keep Service and NFS Server running until PVs are completely gone
+	// The CSI driver needs the NFS service to be available during PV cleanup
+	b.CleanupAllPVsWithWait(ctx, volume, referenceValue)
 
-	// 6. Delete all PVs related to this volume (both main and namespace-specific ones)
-	b.CleanupAllPVs(ctx, volume, referenceValue)
+	// 6. Delete Service (only after PVs are completely gone)
+	b.CleanupServiceInNamespace(ctx, volume, referenceValue, operationalNamespace)
 
-	// 7. Delete NFS Server if it was generated
-	b.CleanupNFSServer(ctx, volume)
+	// 7. Delete NFS Server if it was generated (only after service is gone)
+	b.CleanupNFSServerInNamespace(ctx, volume, operationalNamespace)
 
 	log.Info("Completed comprehensive cleanup for volume", "name", volume.GetName())
 	return nil
@@ -988,6 +1029,11 @@ func (b *VolumeControllerBase) CleanupResources(ctx context.Context, volume Volu
 
 // CleanupAllPodsUsingVolume finds and force deletes all pods that use this volume
 func (b *VolumeControllerBase) CleanupAllPodsUsingVolume(ctx context.Context, volume VolumeObject) {
+	b.CleanupAllPodsUsingVolumeInNamespace(ctx, volume, volume.GetNamespace())
+}
+
+// CleanupAllPodsUsingVolumeInNamespace finds and force deletes all pods that use this volume in the specified namespace
+func (b *VolumeControllerBase) CleanupAllPodsUsingVolumeInNamespace(ctx context.Context, volume VolumeObject, operationalNamespace string) {
 	log := logf.FromContext(ctx)
 
 	// Search across all namespaces for pods using this volume
@@ -998,7 +1044,7 @@ func (b *VolumeControllerBase) CleanupAllPodsUsingVolume(ctx context.Context, vo
 	}
 
 	volumeName := volume.GetName()
-	volumeNamespace := volume.GetNamespace()
+	volumeNamespace := operationalNamespace // Use the operational namespace instead of volume.GetNamespace()
 
 	for _, pod := range podList.Items {
 		// Check if pod has volume annotations
@@ -1038,16 +1084,21 @@ func (b *VolumeControllerBase) CleanupAllPodsUsingVolume(ctx context.Context, vo
 
 // CleanupReplicaSet deletes the ReplicaSet and any remaining pods
 func (b *VolumeControllerBase) CleanupReplicaSet(ctx context.Context, volume VolumeObject, referenceValue string) {
+	b.CleanupReplicaSetInNamespace(ctx, volume, referenceValue, volume.GetNamespace())
+}
+
+// CleanupReplicaSetInNamespace deletes the ReplicaSet and any remaining pods in the specified namespace
+func (b *VolumeControllerBase) CleanupReplicaSetInNamespace(ctx context.Context, volume VolumeObject, referenceValue string, operationalNamespace string) {
 	log := logf.FromContext(ctx)
 
 	rs := &appsv1.ReplicaSet{}
 	if err := b.Get(ctx, client.ObjectKey{
 		Name:      referenceValue,
-		Namespace: volume.GetNamespace(),
+		Namespace: operationalNamespace,
 	}, rs); err == nil {
 		// First, explicitly delete all pods owned by this ReplicaSet
 		podList := &corev1.PodList{}
-		if err := b.List(ctx, podList, client.InNamespace(volume.GetNamespace()), client.MatchingLabels{"app": referenceValue}); err == nil {
+		if err := b.List(ctx, podList, client.InNamespace(operationalNamespace), client.MatchingLabels{"app": referenceValue}); err == nil {
 			for _, pod := range podList.Items {
 				log.Info("Force deleting ReplicaSet pod", "name", pod.Name, "namespace", pod.Namespace)
 				if err := b.ForceDeletePod(ctx, &pod); err != nil {
@@ -1057,7 +1108,7 @@ func (b *VolumeControllerBase) CleanupReplicaSet(ctx context.Context, volume Vol
 		}
 
 		// Then delete the ReplicaSet
-		log.Info("Deleting ReplicaSet", "name", referenceValue, "namespace", volume.GetNamespace())
+		log.Info("Deleting ReplicaSet", "name", referenceValue, "namespace", operationalNamespace)
 		if err := b.Delete(ctx, rs); err != nil {
 			log.Error(err, "Failed to delete ReplicaSet", "name", referenceValue)
 		}
@@ -1068,15 +1119,20 @@ func (b *VolumeControllerBase) CleanupReplicaSet(ctx context.Context, volume Vol
 
 // CleanupService deletes the service
 func (b *VolumeControllerBase) CleanupService(ctx context.Context, volume VolumeObject, referenceValue string) {
+	b.CleanupServiceInNamespace(ctx, volume, referenceValue, volume.GetNamespace())
+}
+
+// CleanupServiceInNamespace deletes the service in the specified namespace
+func (b *VolumeControllerBase) CleanupServiceInNamespace(ctx context.Context, volume VolumeObject, referenceValue string, operationalNamespace string) {
 	log := logf.FromContext(ctx)
 
 	svcName := fmt.Sprintf("%s", referenceValue)
 	svc := &corev1.Service{}
 	if err := b.Get(ctx, client.ObjectKey{
 		Name:      svcName,
-		Namespace: volume.GetNamespace(),
+		Namespace: operationalNamespace,
 	}, svc); err == nil {
-		log.Info("Deleting Service", "name", svcName, "namespace", volume.GetNamespace())
+		log.Info("Deleting Service", "name", svcName, "namespace", operationalNamespace)
 		if err := b.Delete(ctx, svc); err != nil {
 			log.Error(err, "Failed to delete Service", "name", svcName)
 		}
@@ -1087,15 +1143,20 @@ func (b *VolumeControllerBase) CleanupService(ctx context.Context, volume Volume
 
 // CleanupAllPVCs deletes all PVCs related to this volume
 func (b *VolumeControllerBase) CleanupAllPVCs(ctx context.Context, volume VolumeObject, referenceValue string) {
+	b.CleanupAllPVCsInNamespace(ctx, volume, referenceValue, volume.GetNamespace())
+}
+
+// CleanupAllPVCsInNamespace deletes all PVCs related to this volume in the specified namespace
+func (b *VolumeControllerBase) CleanupAllPVCsInNamespace(ctx context.Context, volume VolumeObject, referenceValue string, operationalNamespace string) {
 	log := logf.FromContext(ctx)
 
 	// 1. Delete the main PVC
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := b.Get(ctx, client.ObjectKey{
 		Name:      referenceValue,
-		Namespace: volume.GetNamespace(),
+		Namespace: operationalNamespace,
 	}, pvc); err == nil {
-		log.Info("Force deleting main PVC", "name", referenceValue, "namespace", volume.GetNamespace())
+		log.Info("Force deleting main PVC", "name", referenceValue, "namespace", operationalNamespace)
 		if err := b.ForceDeletePVC(ctx, pvc); err != nil {
 			log.Error(err, "Failed to force delete main PVC", "name", referenceValue)
 		}
@@ -1120,11 +1181,59 @@ func (b *VolumeControllerBase) CleanupAllPVCs(ctx context.Context, volume Volume
 	}
 }
 
+// CleanupAllPVsWithWait deletes all PVs related to this volume and waits for them to be completely gone
+func (b *VolumeControllerBase) CleanupAllPVsWithWait(ctx context.Context, volume VolumeObject, referenceValue string) {
+	log := logf.FromContext(ctx)
+
+	// First, initiate PV deletion
+	b.CleanupAllPVs(ctx, volume, referenceValue)
+
+	// Wait for PVs to be completely deleted before proceeding
+	// This ensures the CSI driver has finished its cleanup before we delete the service
+	maxWaitTime := 2 * time.Minute
+	checkInterval := 5 * time.Second
+	deadline := time.Now().Add(maxWaitTime)
+
+	for time.Now().Before(deadline) {
+		stillExists := false
+
+		// Check main PV
+		pvName := fmt.Sprintf("pv-%s", referenceValue)
+		var pv corev1.PersistentVolume
+		if err := b.Get(ctx, client.ObjectKey{Name: pvName}, &pv); err == nil {
+			log.Info("PV still exists, waiting for deletion", "name", pvName, "phase", pv.Status.Phase)
+			stillExists = true
+		}
+
+		// Check namespace-specific PVs
+		var pvList corev1.PersistentVolumeList
+		if err := b.List(ctx, &pvList); err == nil {
+			for _, pvItem := range pvList.Items {
+				if strings.HasPrefix(pvItem.Name, referenceValue+"-") {
+					log.Info("Namespace-specific PV still exists, waiting for deletion", "name", pvItem.Name, "phase", pvItem.Status.Phase)
+					stillExists = true
+				}
+			}
+		}
+
+		if !stillExists {
+			log.Info("All PVs have been deleted successfully", "referenceValue", referenceValue)
+			return
+		}
+
+		// Wait before checking again
+		time.Sleep(checkInterval)
+	}
+
+	log.Info("Timeout waiting for PVs to be deleted, proceeding with service deletion",
+		"referenceValue", referenceValue, "waitTime", maxWaitTime)
+}
+
 // CleanupAllPVs deletes all PVs related to this volume
 func (b *VolumeControllerBase) CleanupAllPVs(ctx context.Context, volume VolumeObject, referenceValue string) {
 	log := logf.FromContext(ctx)
 
-	// 1. Delete the main PV
+	// 1. Delete the main PV by name
 	pvName := fmt.Sprintf("pv-%s", referenceValue)
 	pv := &corev1.PersistentVolume{}
 	if err := b.Get(ctx, client.ObjectKey{Name: pvName}, pv); err == nil {
@@ -1136,15 +1245,38 @@ func (b *VolumeControllerBase) CleanupAllPVs(ctx context.Context, volume VolumeO
 		log.Error(err, "Failed to get main PV", "name", pvName)
 	}
 
-	// 2. Delete namespace-specific PVs (pattern: referenceValue-namespace)
+	// 2. Find and delete PVs by labels to ensure we don't miss any
+	ownerLabel := fmt.Sprintf("%s.%s", volume.GetName(), volume.GetNamespace())
+
 	pvList := &corev1.PersistentVolumeList{}
 	if err := b.List(ctx, pvList); err == nil {
 		for _, pvItem := range pvList.Items {
-			// Check if PV name follows the pattern: referenceValue-namespace
-			if strings.HasPrefix(pvItem.Name, referenceValue+"-") {
-				log.Info("Force deleting namespace-specific PV", "name", pvItem.Name)
+			shouldDelete := false
+
+			// Check by reference value label
+			if pvItem.Labels != nil {
+				if refValue, exists := pvItem.Labels["shared-volume.io/reference"]; exists && refValue == referenceValue {
+					shouldDelete = true
+					log.Info("Found PV by reference label", "name", pvItem.Name, "referenceValue", refValue)
+				}
+
+				// Also check by owner label
+				if owner, exists := pvItem.Labels["shared-volume.io/owner"]; exists && owner == ownerLabel {
+					shouldDelete = true
+					log.Info("Found PV by owner label", "name", pvItem.Name, "owner", owner)
+				}
+			}
+
+			// Also check if PV name follows the pattern: referenceValue-namespace or pv-referenceValue-*
+			if strings.HasPrefix(pvItem.Name, referenceValue+"-") || strings.HasPrefix(pvItem.Name, "pv-"+referenceValue+"-") {
+				shouldDelete = true
+				log.Info("Found PV by name pattern", "name", pvItem.Name, "pattern", "referenceValue-namespace")
+			}
+
+			if shouldDelete && pvItem.Name != pvName { // Don't delete the main PV twice
+				log.Info("Force deleting related PV", "name", pvItem.Name)
 				if err := b.ForceDeletePV(ctx, &pvItem); err != nil {
-					log.Error(err, "Failed to force delete namespace-specific PV", "name", pvItem.Name)
+					log.Error(err, "Failed to force delete related PV", "name", pvItem.Name)
 				}
 			}
 		}
@@ -1155,6 +1287,11 @@ func (b *VolumeControllerBase) CleanupAllPVs(ctx context.Context, volume VolumeO
 
 // CleanupNFSServer deletes the NFS server if it was generated
 func (b *VolumeControllerBase) CleanupNFSServer(ctx context.Context, volume VolumeObject) {
+	b.CleanupNFSServerInNamespace(ctx, volume, volume.GetNamespace())
+}
+
+// CleanupNFSServerInNamespace deletes the NFS server if it was generated in the specified namespace
+func (b *VolumeControllerBase) CleanupNFSServerInNamespace(ctx context.Context, volume VolumeObject, operationalNamespace string) {
 	log := logf.FromContext(ctx)
 
 	spec := volume.GetVolumeSpec()
@@ -1162,9 +1299,9 @@ func (b *VolumeControllerBase) CleanupNFSServer(ctx context.Context, volume Volu
 		nfsServer := &nfsv1alpha1.NfsServer{}
 		if err := b.Get(ctx, client.ObjectKey{
 			Name:      spec.NfsServer.Name,
-			Namespace: volume.GetNamespace(),
+			Namespace: operationalNamespace,
 		}, nfsServer); err == nil {
-			log.Info("Deleting NFS Server", "name", spec.NfsServer.Name, "namespace", volume.GetNamespace())
+			log.Info("Deleting NFS Server", "name", spec.NfsServer.Name, "namespace", operationalNamespace)
 			if err := b.Delete(ctx, nfsServer); err != nil {
 				log.Error(err, "Failed to delete NfsServer", "name", spec.NfsServer.Name)
 			}
@@ -1231,50 +1368,62 @@ func (b *VolumeControllerBase) ForceDeletePVC(ctx context.Context, pvc *corev1.P
 func (b *VolumeControllerBase) ForceDeletePV(ctx context.Context, pv *corev1.PersistentVolume) error {
 	log := logf.FromContext(ctx)
 
-	log.Info("Deleting PV", "name", pv.Name)
+	log.Info("Starting aggressive PV deletion", "name", pv.Name, "finalizers", pv.Finalizers)
 
-	// First check if PV has CSI or other problematic finalizers and remove them proactively
+	// FIRST: Proactively remove ALL finalizers before attempting deletion
+	// This prevents the PV from getting stuck in Terminating state
 	if len(pv.Finalizers) > 0 {
-		log.Info("PV has finalizers, removing them before deletion to prevent getting stuck",
+		log.Info("PV has finalizers, removing them proactively to prevent getting stuck",
 			"name", pv.Name,
 			"finalizers", pv.Finalizers)
 
 		if err := b.RemovePVFinalizersWithRetry(ctx, pv); err != nil {
 			log.Error(err, "Failed to proactively remove PV finalizers", "name", pv.Name)
-			// Continue with deletion attempt even if finalizer removal failed
+			// Continue with deletion attempt even if finalizer removal failed initially
 		}
 	}
 
-	// Now try normal deletion
+	// SECOND: Attempt normal deletion
+	log.Info("Attempting normal PV deletion", "name", pv.Name)
 	if err := b.Delete(ctx, pv); err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Info("PV already deleted", "name", pv.Name)
+			return nil
+		}
 		log.Error(err, "Failed to delete PV normally", "name", pv.Name)
-		return err
+		// Don't return error yet, try aggressive cleanup
 	}
 
-	// Check if PV is stuck in terminating state due to finalizers
-	// Give it a moment to delete normally first
+	// THIRD: Wait briefly and check if PV still exists
+	time.Sleep(1 * time.Second)
+
 	var updatedPV corev1.PersistentVolume
 	if err := b.Get(ctx, client.ObjectKeyFromObject(pv), &updatedPV); err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("PV successfully deleted", "name", pv.Name)
 			return nil
 		}
+		log.Error(err, "Error checking PV status after deletion", "name", pv.Name)
 		return err
 	}
 
-	// PV still exists, check if it's terminating and has finalizers
-	if updatedPV.DeletionTimestamp != nil && len(updatedPV.Finalizers) > 0 {
-		log.Info("PV is stuck terminating, removing finalizers",
-			"name", pv.Name,
-			"finalizers", updatedPV.Finalizers)
+	// FOURTH: PV still exists, try more aggressive cleanup
+	log.Info("PV still exists after deletion attempt, trying aggressive cleanup",
+		"name", pv.Name,
+		"phase", updatedPV.Status.Phase,
+		"finalizers", updatedPV.Finalizers,
+		"deletionTimestamp", updatedPV.DeletionTimestamp)
 
-		// Remove all finalizers to force deletion with retry
-		if err := b.RemovePVFinalizersWithRetry(ctx, &updatedPV); err != nil {
-			log.Error(err, "Failed to remove finalizers from PV", "name", pv.Name)
+	// Force remove any remaining finalizers using strategic patch
+	if len(updatedPV.Finalizers) > 0 || updatedPV.DeletionTimestamp != nil {
+		log.Info("Applying strategic patch to force remove all finalizers", "name", pv.Name)
+		if err := b.forceRemovePVFinalizersWithPatch(ctx, pv.Name); err != nil {
+			log.Error(err, "Failed to apply strategic patch for finalizer removal", "name", pv.Name)
 			return err
 		}
 	}
 
+	log.Info("Completed aggressive PV deletion process", "name", pv.Name)
 	return nil
 }
 
@@ -1282,7 +1431,7 @@ func (b *VolumeControllerBase) ForceDeletePV(ctx context.Context, pv *corev1.Per
 func (b *VolumeControllerBase) RemovePVFinalizersWithRetry(ctx context.Context, pv *corev1.PersistentVolume) error {
 	log := logf.FromContext(ctx)
 
-	maxRetries := 3
+	maxRetries := 5 // Increased retries for stubborn CSI finalizers
 	retryCount := 0
 
 	for {
@@ -1295,6 +1444,17 @@ func (b *VolumeControllerBase) RemovePVFinalizersWithRetry(ctx context.Context, 
 			}
 			return err
 		}
+
+		// If no finalizers, we're done
+		if len(latestPV.Finalizers) == 0 {
+			log.Info("PV has no finalizers to remove", "name", pv.Name)
+			return nil
+		}
+
+		log.Info("Attempting to remove PV finalizers",
+			"name", pv.Name,
+			"attempt", retryCount+1,
+			"finalizers", latestPV.Finalizers)
 
 		// Remove all finalizers
 		latestPV.Finalizers = []string{}
@@ -1309,12 +1469,62 @@ func (b *VolumeControllerBase) RemovePVFinalizersWithRetry(ctx context.Context, 
 					"maxRetries", maxRetries)
 				continue
 			}
+
+			// If regular update fails and we still have retries, try a more aggressive approach
+			if retryCount < maxRetries {
+				retryCount++
+				log.Info("Regular update failed, trying strategic patch to force remove finalizers",
+					"name", pv.Name,
+					"retry", retryCount,
+					"error", err.Error())
+
+				// Use strategic patch to set finalizers to null
+				if patchErr := b.forceRemovePVFinalizersWithPatch(ctx, pv.Name); patchErr != nil {
+					log.Error(patchErr, "Strategic patch also failed", "name", pv.Name)
+					if retryCount >= maxRetries {
+						return patchErr
+					}
+					continue
+				}
+
+				log.Info("Strategic patch succeeded in removing PV finalizers", "name", pv.Name)
+				return nil
+			}
+
 			return err
 		}
 
 		log.Info("Successfully removed finalizers from PV", "name", pv.Name)
 		return nil
 	}
+}
+
+// forceRemovePVFinalizersWithPatch uses strategic patch to aggressively remove PV finalizers
+func (b *VolumeControllerBase) forceRemovePVFinalizersWithPatch(ctx context.Context, pvName string) error {
+	log := logf.FromContext(ctx)
+
+	// Create a patch that sets finalizers to null (more aggressive than empty array)
+	patch := []byte(`{"metadata":{"finalizers":null}}`)
+
+	log.Info("Using strategic patch to force remove PV finalizers", "name", pvName)
+
+	// Apply the patch
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: pvName,
+		},
+	}
+
+	if err := b.Patch(ctx, pv, client.RawPatch(types.MergePatchType, patch)); err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Info("PV not found during strategic patch, already deleted", "name", pvName)
+			return nil
+		}
+		return err
+	}
+
+	log.Info("Successfully applied strategic patch to remove PV finalizers", "name", pvName)
+	return nil
 }
 
 // RemovePVCFinalizersWithRetry removes finalizers from a PVC with retry logic to handle conflicts
@@ -1971,11 +2181,16 @@ func (b *VolumeControllerBase) WaitForPodsToTerminate(ctx context.Context, volum
 
 // ForceCleanupAllResources immediately force deletes all remaining pods without waiting
 func (b *VolumeControllerBase) ForceCleanupAllResources(ctx context.Context, volume VolumeObject, referenceValue string) {
+	b.ForceCleanupAllResourcesInNamespace(ctx, volume, referenceValue, volume.GetNamespace())
+}
+
+// ForceCleanupAllResourcesInNamespace immediately force deletes all remaining pods without waiting in the specified namespace
+func (b *VolumeControllerBase) ForceCleanupAllResourcesInNamespace(ctx context.Context, volume VolumeObject, referenceValue string, operationalNamespace string) {
 	log := logf.FromContext(ctx)
 
 	// Immediately force delete any remaining pods with the volume's label
 	podList := &corev1.PodList{}
-	if err := b.List(ctx, podList, client.InNamespace(volume.GetNamespace()), client.MatchingLabels{"app": referenceValue}); err != nil {
+	if err := b.List(ctx, podList, client.InNamespace(operationalNamespace), client.MatchingLabels{"app": referenceValue}); err != nil {
 		log.Error(err, "Failed to list pods for immediate force cleanup", "referenceValue", referenceValue)
 		return
 	}

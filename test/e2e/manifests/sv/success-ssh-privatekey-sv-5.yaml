@@ -12,7 +12,7 @@ spec:
     capacity: "{{STORAGE_CAPACITY_MEDIUM}}"
   source:
     ssh:
-      host: "{{SSH_HOST_KEY}}"
-      user: "{{SSH_USER_KEY}}"
+      host: "{{SSH_HOST}}"
+      user: "{{SSH_USER}}"
       privateKey: "{{B64_SSH_PRIVATE_KEY}}"
       path: "{{SSH_PATH}}"
