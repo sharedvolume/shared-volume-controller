@@ -108,7 +108,7 @@ func createTestPod(annotations map[string]string) *corev1.Pod {
 			Containers: []corev1.Container{
 				{
 					Name:  "test-container",
-					Image: "sharedvolume/volume-syncer:0.0.8",
+					Image: "sharedvolume/volume-syncer:0.0.18",
 				},
 			},
 		},

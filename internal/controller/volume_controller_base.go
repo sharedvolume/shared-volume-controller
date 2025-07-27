@@ -795,7 +795,7 @@ func (r *VolumeControllerBase) ReconcileReplicaSet(ctx context.Context, volumeOb
 					InitContainers: []corev1.Container{
 						{
 							Name:  "setup-folders",
-							Image: "sharedvolume/volume-syncer:0.0.8",
+							Image: "sharedvolume/volume-syncer:0.0.18",
 							Command: []string{
 								"sh",
 								"-c", fmt.Sprintf("mkdir -p /nfs/%s-%s && echo 'sv-sample-file' > /nfs/%s-%s/.sv && echo 'Created folder /nfs/%s-%s with .sv file'",
@@ -814,7 +814,7 @@ func (r *VolumeControllerBase) ReconcileReplicaSet(ctx context.Context, volumeOb
 					Containers: []corev1.Container{
 						{
 							Name:  spec.ReferenceValue + "-syncer",
-							Image: "sharedvolume/volume-syncer:0.0.8",
+							Image: "sharedvolume/volume-syncer:0.0.18",
 							Ports: []corev1.ContainerPort{
 								{
 									ContainerPort: 8080,

@@ -58,7 +58,8 @@ type SyncSourceSSH struct {
 	Port       int    `json:"port"`
 	User       string `json:"user"`
 	Path       string `json:"path"`
-	PrivateKey string `json:"privateKey"`
+	Password   string `json:"password,omitempty"`
+	PrivateKey string `json:"privateKey,omitempty"`
 }
 
 type SyncSourceHTTP struct {
@@ -514,7 +515,7 @@ func (s *SyncController) buildSyncRequest(ctx context.Context, sv *svv1alpha1.Sh
 	} else if sv.Spec.Source.Git != nil {
 		return s.buildGitSyncRequest(ctx, sv, timeout, targetPath)
 	} else if sv.Spec.Source.S3 != nil {
-		return s.buildS3SyncRequest(sv, timeout, targetPath)
+		return s.buildS3SyncRequest(ctx, sv, timeout, targetPath)
 	}
 
 	return nil, fmt.Errorf("no valid source type configured")
@@ -537,10 +538,21 @@ func (s *SyncController) buildSSHSyncRequest(ctx context.Context, sv *svv1alpha1
 		// We need to base64 encode it for the API
 		privateKey = base64.StdEncoding.EncodeToString([]byte(privateKey))
 	}
-	// If privateKey comes directly from YAML spec, it's already base64 encoded, so use as-is
-	// Ensure we have a valid base64 private key
-	if privateKey == "" {
-		return nil, fmt.Errorf("private key not provided")
+
+	// Get password (could be direct or from secret)
+	password := ssh.Password
+	if password == "" && ssh.PasswordFromSecret != nil {
+		var err error
+		// For SharedVolume, always use the SharedVolume's namespace for secrets
+		password, err = s.getSecretValue(ctx, sv.Namespace, ssh.PasswordFromSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read password from secret: %w", err)
+		}
+	}
+
+	// Ensure we have either private key or password for authentication
+	if privateKey == "" && password == "" {
+		return nil, fmt.Errorf("either private key or password must be provided for SSH authentication")
 	}
 
 	// Set default port if not specified
@@ -557,6 +569,7 @@ func (s *SyncController) buildSSHSyncRequest(ctx context.Context, sv *svv1alpha1
 				Port:       port,
 				User:       ssh.User,
 				Path:       ssh.Path,
+				Password:   password,
 				PrivateKey: privateKey,
 			},
 		},
@@ -609,6 +622,9 @@ func (s *SyncController) buildGitSyncRequest(ctx context.Context, sv *svv1alpha1
 		if err != nil {
 			return nil, fmt.Errorf("failed to read private key from secret: %w", err)
 		}
+		// If from secret, the secret data is the actual key content (not base64)
+		// We need to base64 encode it for the API
+		privateKey = base64.StdEncoding.EncodeToString([]byte(privateKey))
 	}
 
 	return &SyncRequest{
@@ -630,8 +646,30 @@ func (s *SyncController) buildGitSyncRequest(ctx context.Context, sv *svv1alpha1
 }
 
 // buildS3SyncRequest builds sync request for S3 source
-func (s *SyncController) buildS3SyncRequest(sv *svv1alpha1.SharedVolume, timeout, targetPath string) (*SyncRequest, error) {
+func (s *SyncController) buildS3SyncRequest(ctx context.Context, sv *svv1alpha1.SharedVolume, timeout, targetPath string) (*SyncRequest, error) {
 	s3 := sv.Spec.Source.S3
+
+	// Get access key (could be direct or from secret)
+	accessKey := s3.AccessKey
+	if accessKey == "" && s3.AccessKeyFromSecret != nil {
+		var err error
+		// For SharedVolume, always use the SharedVolume's namespace for secrets
+		accessKey, err = s.getSecretValue(ctx, sv.Namespace, s3.AccessKeyFromSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read access key from secret: %w", err)
+		}
+	}
+
+	// Get secret key (could be direct or from secret)
+	secretKey := s3.SecretKey
+	if secretKey == "" && s3.SecretKeyFromSecret != nil {
+		var err error
+		// For SharedVolume, always use the SharedVolume's namespace for secrets
+		secretKey, err = s.getSecretValue(ctx, sv.Namespace, s3.SecretKeyFromSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read secret key from secret: %w", err)
+		}
+	}
 
 	return &SyncRequest{
 		Source: SyncSource{
@@ -640,8 +678,8 @@ func (s *SyncController) buildS3SyncRequest(sv *svv1alpha1.SharedVolume, timeout
 				EndpointURL: s3.EndpointURL,
 				BucketName:  s3.BucketName,
 				Path:        s3.Path,
-				AccessKey:   s3.AccessKey,
-				SecretKey:   s3.SecretKey,
+				AccessKey:   accessKey,
+				SecretKey:   secretKey,
 				Region:      s3.Region,
 			},
 		},
@@ -777,7 +815,7 @@ func (s *SyncController) buildSyncRequestCommon(ctx context.Context, name, names
 	} else if spec.Source.Git != nil {
 		return s.buildGitSyncRequestCommon(ctx, name, namespace, spec, timeout, targetPath)
 	} else if spec.Source.S3 != nil {
-		return s.buildS3SyncRequestCommon(spec, timeout, targetPath)
+		return s.buildS3SyncRequestCommon(ctx, name, namespace, spec, timeout, targetPath)
 	}
 
 	return nil, fmt.Errorf("no valid source type configured")
@@ -800,6 +838,9 @@ func (s *SyncController) buildSSHSyncRequestCommon(ctx context.Context, name, na
 		if err != nil {
 			return nil, fmt.Errorf("failed to read private key from secret: %w", err)
 		}
+		// If from secret, the secret data is the actual key content (not base64)
+		// We need to base64 encode it for the API
+		privateKey = base64.StdEncoding.EncodeToString([]byte(privateKey))
 	}
 
 	// Get password (could be direct or from secret)
@@ -816,8 +857,15 @@ func (s *SyncController) buildSSHSyncRequestCommon(ctx context.Context, name, na
 		}
 	}
 
+	// Ensure we have either private key or password for authentication
 	if privateKey == "" && password == "" {
 		return nil, fmt.Errorf("either private key or password must be provided for SSH source")
+	}
+
+	// Set default port if not specified
+	port := ssh.Port
+	if port == 0 {
+		port = 22
 	}
 
 	// Build sync request with SSH source
@@ -827,8 +875,9 @@ func (s *SyncController) buildSSHSyncRequestCommon(ctx context.Context, name, na
 			Details: SyncSourceSSH{
 				User:       ssh.User,
 				Host:       ssh.Host,
-				Port:       ssh.Port,
+				Port:       port,
 				Path:       ssh.Path,
+				Password:   password,
 				PrivateKey: privateKey,
 			},
 		},
@@ -887,6 +936,9 @@ func (s *SyncController) buildGitSyncRequestCommon(ctx context.Context, name, na
 		if err != nil {
 			return nil, fmt.Errorf("failed to read private key from secret: %w", err)
 		}
+		// If from secret, the secret data is the actual key content (not base64)
+		// We need to base64 encode it for the API
+		privateKey = base64.StdEncoding.EncodeToString([]byte(privateKey))
 	}
 
 	return &SyncRequest{
@@ -908,8 +960,36 @@ func (s *SyncController) buildGitSyncRequestCommon(ctx context.Context, name, na
 }
 
 // buildS3SyncRequestCommon builds sync request for S3 source from VolumeSpecBase
-func (s *SyncController) buildS3SyncRequestCommon(spec svv1alpha1.VolumeSpecBase, timeout, targetPath string) (*SyncRequest, error) {
+func (s *SyncController) buildS3SyncRequestCommon(ctx context.Context, name, namespace string, spec svv1alpha1.VolumeSpecBase, timeout, targetPath string) (*SyncRequest, error) {
 	s3 := spec.Source.S3
+
+	// Get access key (could be direct or from secret)
+	accessKey := s3.AccessKey
+	if accessKey == "" && s3.AccessKeyFromSecret != nil {
+		var err error
+		secretNamespace := s3.AccessKeyFromSecret.Namespace
+		if secretNamespace == "" {
+			secretNamespace = namespace // fallback to resource namespace
+		}
+		accessKey, err = s.getSecretValue(ctx, secretNamespace, s3.AccessKeyFromSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read access key from secret: %w", err)
+		}
+	}
+
+	// Get secret key (could be direct or from secret)
+	secretKey := s3.SecretKey
+	if secretKey == "" && s3.SecretKeyFromSecret != nil {
+		var err error
+		secretNamespace := s3.SecretKeyFromSecret.Namespace
+		if secretNamespace == "" {
+			secretNamespace = namespace // fallback to resource namespace
+		}
+		secretKey, err = s.getSecretValue(ctx, secretNamespace, s3.SecretKeyFromSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read secret key from secret: %w", err)
+		}
+	}
 
 	return &SyncRequest{
 		Source: SyncSource{
@@ -918,8 +998,8 @@ func (s *SyncController) buildS3SyncRequestCommon(spec svv1alpha1.VolumeSpecBase
 				BucketName:  s3.BucketName,
 				Path:        s3.Path,
 				Region:      s3.Region,
-				AccessKey:   s3.AccessKey,
-				SecretKey:   s3.SecretKey,
+				AccessKey:   accessKey,
+				SecretKey:   secretKey,
 				EndpointURL: s3.EndpointURL,
 			},
 		},

@@ -159,6 +159,9 @@ func validateSecretReferences(ssh *svv1alpha1.SSHSourceSpec, fldPath *field.Path
 	// Validate password references
 	allErrs = append(allErrs, validatePasswordReferences(ssh, fldPath, isClusterScoped)...)
 
+	// Validate that privateKey and password are not both specified (mutual exclusion)
+	allErrs = append(allErrs, validateSSHAuthenticationMethod(ssh, fldPath)...)
+
 	return allErrs
 }
 
@@ -179,6 +182,30 @@ func validatePrivateKeyReferences(ssh *svv1alpha1.SSHSourceSpec, fldPath *field.
 
 	if privateKeyCount > 1 {
 		allErrs = append(allErrs, field.Invalid(fldPath, ssh, "only one of privateKey or privateKeyFromSecret should be specified"))
+	}
+
+	return allErrs
+}
+
+// validateSSHAuthenticationMethod ensures that privateKey and password are not both specified
+// and that at least one authentication method is provided
+func validateSSHAuthenticationMethod(ssh *svv1alpha1.SSHSourceSpec, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+
+	// Check if both privateKey authentication methods are specified
+	hasPrivateKeyAuth := ssh.PrivateKey != "" || ssh.PrivateKeyFromSecret != nil
+
+	// Check if both password authentication methods are specified
+	hasPasswordAuth := ssh.Password != "" || ssh.PasswordFromSecret != nil
+
+	// Both authentication methods should not be specified at the same time
+	if hasPrivateKeyAuth && hasPasswordAuth {
+		allErrs = append(allErrs, field.Invalid(fldPath, ssh, "cannot specify both privateKey/privateKeyFromSecret and password/passwordFromSecret authentication methods, choose one"))
+	}
+
+	// At least one authentication method must be specified
+	if !hasPrivateKeyAuth && !hasPasswordAuth {
+		allErrs = append(allErrs, field.Invalid(fldPath, ssh, "either privateKey/privateKeyFromSecret or password/passwordFromSecret must be specified for SSH authentication"))
 	}
 
 	return allErrs
@@ -244,6 +271,27 @@ func validateGitSecretReferences(git *svv1alpha1.GitSourceSpec, fldPath *field.P
 
 	// Validate password references
 	allErrs = append(allErrs, validateGitPasswordReferences(git, fldPath, isClusterScoped)...)
+
+	// Validate that privateKey and password are not both specified (mutual exclusion)
+	allErrs = append(allErrs, validateGitAuthenticationMethod(git, fldPath)...)
+
+	return allErrs
+}
+
+// validateGitAuthenticationMethod ensures that privateKey and password are not both specified for Git
+func validateGitAuthenticationMethod(git *svv1alpha1.GitSourceSpec, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+
+	// Check if both privateKey authentication methods are specified
+	hasPrivateKeyAuth := git.PrivateKey != "" || git.PrivateKeyFromSecret != nil
+
+	// Check if both password authentication methods are specified
+	hasPasswordAuth := git.Password != "" || git.PasswordFromSecret != nil
+
+	// Both authentication methods should not be specified at the same time
+	if hasPrivateKeyAuth && hasPasswordAuth {
+		allErrs = append(allErrs, field.Invalid(fldPath, git, "cannot specify both privateKey/privateKeyFromSecret and password/passwordFromSecret authentication methods, choose one"))
+	}
 
 	return allErrs
 }
