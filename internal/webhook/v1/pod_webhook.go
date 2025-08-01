@@ -96,6 +96,12 @@ func (a *PodAnnotator) Handle(ctx context.Context, req admission.Request) admiss
 		return admission.Allowed("No shared volume annotations found")
 	}
 
+	// Validate that all referenced volumes have unique mount paths before any processing
+	if err := a.validateUniqueMountPaths(ctx, sharedVolumes); err != nil {
+		logger.Error(err, "shared volume mount path validation failed", "pod", pod.Name, "namespace", pod.Namespace)
+		return admission.Denied(err.Error())
+	}
+
 	// Process each shared volume
 	for _, svRef := range sharedVolumes {
 		if err := a.processSharedVolume(ctx, pod, svRef); err != nil {
@@ -167,6 +173,53 @@ func (a *PodAnnotator) extractSharedVolumeAnnotations(pod *corev1.Pod) []SharedV
 	}
 
 	return sharedVolumes
+}
+
+// validateUniqueMountPaths checks that all SharedVolumes/ClusterSharedVolumes have unique mount paths
+func (a *PodAnnotator) validateUniqueMountPaths(ctx context.Context, sharedVolumes []SharedVolumeRef) error {
+	mountPaths := make(map[string][]string) // map[mountPath][]volumeNames
+
+	for _, svRef := range sharedVolumes {
+		var mountPath string
+		var volumeDisplayName string
+
+		if svRef.IsCluster {
+			// Fetch the ClusterSharedVolume resource
+			clusterSharedVolume := &svv1alpha1.ClusterSharedVolume{}
+			err := a.Client.Get(ctx, types.NamespacedName{Name: svRef.Name}, clusterSharedVolume)
+			if err != nil {
+				return fmt.Errorf("failed to get ClusterSharedVolume %s: %w", svRef.Name, err)
+			}
+			mountPath = clusterSharedVolume.Spec.MountPath
+			volumeDisplayName = fmt.Sprintf("ClusterSharedVolume/%s", svRef.Name)
+		} else {
+			// Fetch the SharedVolume resource
+			sharedVolume := &svv1alpha1.SharedVolume{}
+			err := a.Client.Get(ctx, types.NamespacedName{Name: svRef.Name, Namespace: svRef.Namespace}, sharedVolume)
+			if err != nil {
+				return fmt.Errorf("failed to get SharedVolume %s/%s: %w", svRef.Namespace, svRef.Name, err)
+			}
+			mountPath = sharedVolume.Spec.MountPath
+			volumeDisplayName = fmt.Sprintf("SharedVolume/%s/%s", svRef.Namespace, svRef.Name)
+		}
+
+		// Track volumes using this mount path
+		mountPaths[mountPath] = append(mountPaths[mountPath], volumeDisplayName)
+	}
+
+	// Check for duplicate mount paths
+	var duplicates []string
+	for mountPath, volumes := range mountPaths {
+		if len(volumes) > 1 {
+			duplicates = append(duplicates, fmt.Sprintf("mount path '%s' is used by: %s", mountPath, strings.Join(volumes, ", ")))
+		}
+	}
+
+	if len(duplicates) > 0 {
+		return fmt.Errorf("duplicate mount paths detected: %s", strings.Join(duplicates, "; "))
+	}
+
+	return nil
 }
 
 // processSharedVolume handles the creation of PV, PVC, and volume mounting for a SharedVolume or ClusterSharedVolume

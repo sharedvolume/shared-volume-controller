@@ -66,13 +66,17 @@ func (v *SharedVolumeCustomValidator) ValidateCreate(_ context.Context, obj runt
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type SharedVolume.
 func (v *SharedVolumeCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
-	sharedvolume, ok := newObj.(*svv1alpha1.SharedVolume)
+	oldSharedVolume, ok := oldObj.(*svv1alpha1.SharedVolume)
+	if !ok {
+		return nil, fmt.Errorf("expected a SharedVolume object for the oldObj but got %T", oldObj)
+	}
+	newSharedVolume, ok := newObj.(*svv1alpha1.SharedVolume)
 	if !ok {
 		return nil, fmt.Errorf("expected a SharedVolume object for the newObj but got %T", newObj)
 	}
-	sharedvolumelog.Info("Validation for SharedVolume upon update", "name", sharedvolume.GetName())
+	sharedvolumelog.Info("Validation for SharedVolume upon update", "name", newSharedVolume.GetName())
 
-	return nil, validation.ValidateVolumeObject(sharedvolume, &sharedvolume.Spec.VolumeSpecBase, "SharedVolume")
+	return nil, validation.ValidateVolumeObjectUpdate(oldSharedVolume, newSharedVolume, &oldSharedVolume.Spec.VolumeSpecBase, &newSharedVolume.Spec.VolumeSpecBase, "SharedVolume")
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type SharedVolume.

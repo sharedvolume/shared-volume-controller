@@ -26,6 +26,10 @@ import (
 	svv1alpha1 "github.com/sharedvolume/shared-volume-controller/api/v1alpha1"
 )
 
+const (
+	ErrFieldImmutable = "field is immutable"
+)
+
 // ValidateVolumeSpec validates the common volume specification
 func ValidateVolumeSpec(spec *svv1alpha1.VolumeSpecBase, fldPath *field.Path, isClusterScoped bool) field.ErrorList {
 	var allErrs field.ErrorList
@@ -487,6 +491,128 @@ func ValidateVolumeObject(obj metav1.Object, spec *svv1alpha1.VolumeSpecBase, ki
 	}
 
 	return fmt.Errorf("%s validation failed: %v", kind, allErrs)
+}
+
+// ValidateVolumeObjectUpdate validates a volume object update for immutable fields
+func ValidateVolumeObjectUpdate(oldObj, newObj metav1.Object, oldSpec, newSpec *svv1alpha1.VolumeSpecBase, kind string) error {
+	var allErrs field.ErrorList
+
+	// First run the regular validation on the new object
+	if specErrs := ValidateVolumeObject(newObj, newSpec, kind); specErrs != nil {
+		return specErrs
+	}
+
+	// Check immutable fields - only source, syncInterval, and syncTimeout can be changed
+	fldPath := field.NewPath("spec")
+
+	// Check immutable fields in VolumeSpecBase with smart logic for controller defaults
+	if oldSpec.MountPath != newSpec.MountPath && oldSpec.MountPath != "" {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("mountPath"), newSpec.MountPath, ErrFieldImmutable))
+	}
+
+	if oldSpec.StorageClassName != newSpec.StorageClassName && oldSpec.StorageClassName != "" {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("storageClassName"), newSpec.StorageClassName, ErrFieldImmutable))
+	}
+
+	// Allow controller to set ResourceNamespace when it's empty
+	if oldSpec.ResourceNamespace != newSpec.ResourceNamespace && oldSpec.ResourceNamespace != "" {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("resourceNamespace"), newSpec.ResourceNamespace, ErrFieldImmutable))
+	}
+
+	// Allow controller to set ReferenceValue when it's empty
+	if oldSpec.ReferenceValue != newSpec.ReferenceValue && oldSpec.ReferenceValue != "" {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("referenceValue"), newSpec.ReferenceValue, ErrFieldImmutable))
+	}
+
+	// Check Storage immutability with smart logic for controller defaults
+	if !compareStorageSpecsWithDefaults(oldSpec.Storage, newSpec.Storage) {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("storage"), newSpec.Storage, ErrFieldImmutable))
+	}
+
+	// Check NfsServer immutability with smart logic for controller defaults
+	if !compareNfsServerSpecsWithDefaults(oldSpec.NfsServer, newSpec.NfsServer) {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("nfsServer"), newSpec.NfsServer, ErrFieldImmutable))
+	}
+
+	// Note: Source, SyncInterval, and SyncTimeout are allowed to change
+
+	if len(allErrs) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("%s update validation failed: %v", kind, allErrs)
+}
+
+// compareStorageSpecs compares two StorageSpec pointers for equality
+func compareStorageSpecs(old, new *svv1alpha1.StorageSpec) bool {
+	if old == nil && new == nil {
+		return true
+	}
+	if old == nil || new == nil {
+		return false
+	}
+	return old.Capacity == new.Capacity && old.AccessMode == new.AccessMode
+}
+
+// compareStorageSpecsWithDefaults compares two StorageSpec pointers for equality,
+// allowing controller to set defaults when old values are empty
+func compareStorageSpecsWithDefaults(old, new *svv1alpha1.StorageSpec) bool {
+	if old == nil && new == nil {
+		return true
+	}
+	if old == nil || new == nil {
+		return false
+	}
+
+	// Allow controller to set AccessMode default when it was empty
+	accessModeEqual := old.AccessMode == new.AccessMode ||
+		(old.AccessMode == "" && new.AccessMode == "ReadOnly")
+
+	// Capacity should not change once set
+	capacityEqual := old.Capacity == new.Capacity
+
+	return capacityEqual && accessModeEqual
+}
+
+// compareNfsServerSpecs compares two NfsServerSpec pointers for equality
+func compareNfsServerSpecs(old, new *svv1alpha1.NfsServerSpec) bool {
+	if old == nil && new == nil {
+		return true
+	}
+	if old == nil || new == nil {
+		return false
+	}
+	return old.Name == new.Name &&
+		old.Namespace == new.Namespace &&
+		old.URL == new.URL &&
+		old.Image == new.Image &&
+		old.Path == new.Path
+}
+
+// compareNfsServerSpecsWithDefaults compares two NfsServerSpec pointers for equality,
+// allowing controller to set defaults when old values are empty
+func compareNfsServerSpecsWithDefaults(old, new *svv1alpha1.NfsServerSpec) bool {
+	if old == nil && new == nil {
+		return true
+	}
+	// Allow controller to set entire NfsServer spec when it was previously nil
+	if old == nil && new != nil {
+		return true
+	}
+	if old != nil && new == nil {
+		return false
+	}
+
+	// Allow controller to set defaults when fields were empty
+	nameEqual := old.Name == new.Name
+	namespaceEqual := old.Namespace == new.Namespace
+	urlEqual := old.URL == new.URL
+	imageEqual := old.Image == new.Image
+
+	// Allow controller to set Path default when it was empty
+	pathEqual := old.Path == new.Path || (old.Path == "" && new.Path == "/")
+
+	return nameEqual && namespaceEqual && urlEqual && imageEqual && pathEqual
 }
 
 // validateSecretKeySelector validates a SecretKeySelector

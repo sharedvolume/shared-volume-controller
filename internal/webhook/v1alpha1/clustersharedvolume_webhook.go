@@ -66,13 +66,17 @@ func (v *ClusterSharedVolumeCustomValidator) ValidateCreate(_ context.Context, o
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type ClusterSharedVolume.
 func (v *ClusterSharedVolumeCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
-	clustersharedvolume, ok := newObj.(*svv1alpha1.ClusterSharedVolume)
+	oldClusterSharedVolume, ok := oldObj.(*svv1alpha1.ClusterSharedVolume)
+	if !ok {
+		return nil, fmt.Errorf("expected a ClusterSharedVolume object for the oldObj but got %T", oldObj)
+	}
+	newClusterSharedVolume, ok := newObj.(*svv1alpha1.ClusterSharedVolume)
 	if !ok {
 		return nil, fmt.Errorf("expected a ClusterSharedVolume object for the newObj but got %T", newObj)
 	}
-	clustersharedvolumelog.Info("Validation for ClusterSharedVolume upon update", "name", clustersharedvolume.GetName())
+	clustersharedvolumelog.Info("Validation for ClusterSharedVolume upon update", "name", newClusterSharedVolume.GetName())
 
-	return nil, validation.ValidateVolumeObject(clustersharedvolume, &clustersharedvolume.Spec.VolumeSpecBase, "ClusterSharedVolume")
+	return nil, validation.ValidateVolumeObjectUpdate(oldClusterSharedVolume, newClusterSharedVolume, &oldClusterSharedVolume.Spec.VolumeSpecBase, &newClusterSharedVolume.Spec.VolumeSpecBase, "ClusterSharedVolume")
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type ClusterSharedVolume.
