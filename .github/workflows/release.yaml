@@ -12,6 +12,7 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     
     steps:
     - name: Checkout code
