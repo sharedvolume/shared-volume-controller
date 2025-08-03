@@ -1,0 +1,35 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: ssuccess-git-basic-csv
+spec:
+  mountPath: "/opt/mnt/git-basic"
+  syncInterval: "1m"
+  syncTimeout: "30s"
+  storageClassName: "standard"
+  storage:
+    capacity: "2Gi"
+  source:
+    git:
+      url: "https://bitbucket.int.sahibinden.com/scm/misc/jenkins-devops-libs.git"
+      branch: "master"
+      user: "bilgehan.nal"
+      password: "***"
+---
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: success-git-basic-sv
+spec:
+  mountPath: "/opt/mnt/git-basic"
+  syncInterval: "1m"
+  syncTimeout: "30s"
+  storageClassName: "standard"
+  storage:
+    capacity: "2Gi"
+  source:
+    git:
+      url: "https://github.com/bilgehannal/gp-server-side.git"
+      branch: "master"
+      user: "bilgehannal"
+      password: "***"

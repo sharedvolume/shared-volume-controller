@@ -39,6 +39,11 @@ func ValidateVolumeSpec(spec *svv1alpha1.VolumeSpecBase, fldPath *field.Path, is
 		allErrs = append(allErrs, err...)
 	}
 
+	// Validate NFS server configuration for create (strict validation)
+	if err := validateNfsServerConfigForCreate(spec.NfsServer, fldPath.Child("nfsServer")); err != nil {
+		allErrs = append(allErrs, err...)
+	}
+
 	// Validate source configuration
 	if err := validateSourceSpec(spec.Source, fldPath.Child("source"), isClusterScoped); err != nil {
 		allErrs = append(allErrs, err...)
@@ -66,7 +71,34 @@ func validateMandatoryFields(spec *svv1alpha1.VolumeSpecBase, fldPath *field.Pat
 	return allErrs
 }
 
-// validateSourceSpec validates source configuration
+// validateNfsServerConfig validates NFS server configuration
+// All NFS server validation has been removed to allow controller full control
+func validateNfsServerConfig(nfsServer *svv1alpha1.NfsServerSpec, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	// No validation - controller can set any NFS server fields
+	return allErrs
+}
+
+// validateNfsServerConfigForCreate validates NFS server configuration for create operations
+// All NFS server validation has been removed to allow controller full control
+func validateNfsServerConfigForCreate(nfsServer *svv1alpha1.NfsServerSpec, fldPath *field.Path) field.ErrorList {
+	// No validation - controller can set any NFS server fields
+	return field.ErrorList{}
+}
+
+// validateExternalNfsServerConfig validates external NFS server configuration
+// All NFS server validation has been removed to allow controller full control
+func validateExternalNfsServerConfig(nfsServer *svv1alpha1.NfsServerSpec, fldPath *field.Path) field.ErrorList {
+	// No validation - controller can set any NFS server fields
+	return field.ErrorList{}
+}
+
+// validateNfsServerConfigForUpdate validates NFS server configuration for update operations
+// All NFS server validation has been removed to allow controller full control
+func validateNfsServerConfigForUpdate(oldNfsServer, newNfsServer *svv1alpha1.NfsServerSpec, fldPath *field.Path) field.ErrorList {
+	// No validation - controller can set any NFS server fields
+	return field.ErrorList{}
+} // validateSourceSpec validates source configuration
 func validateSourceSpec(source *svv1alpha1.VolumeSourceSpec, fldPath *field.Path, isClusterScoped bool) field.ErrorList {
 	var allErrs field.ErrorList
 
@@ -497,14 +529,33 @@ func ValidateVolumeObject(obj metav1.Object, spec *svv1alpha1.VolumeSpecBase, ki
 func ValidateVolumeObjectUpdate(oldObj, newObj metav1.Object, oldSpec, newSpec *svv1alpha1.VolumeSpecBase, kind string) error {
 	var allErrs field.ErrorList
 
-	// First run the regular validation on the new object
-	if specErrs := ValidateVolumeObject(newObj, newSpec, kind); specErrs != nil {
-		return specErrs
+	// Determine if this is a cluster-scoped resource
+	isClusterScoped := kind == "ClusterSharedVolume"
+
+	// Validate mandatory fields
+	fldPath := field.NewPath("spec")
+	if err := validateMandatoryFields(newSpec, fldPath); err != nil {
+		allErrs = append(allErrs, err...)
+	}
+
+	// Validate NFS server configuration for update (allows controller updates)
+	if err := validateNfsServerConfigForUpdate(oldSpec.NfsServer, newSpec.NfsServer, fldPath.Child("nfsServer")); err != nil {
+		allErrs = append(allErrs, err...)
+	}
+
+	// Validate source configuration
+	if err := validateSourceSpec(newSpec.Source, fldPath.Child("source"), isClusterScoped); err != nil {
+		allErrs = append(allErrs, err...)
+	}
+
+	// Validate sync configuration (only if source is configured or sync fields are explicitly set)
+	if newSpec.Source != nil || newSpec.SyncInterval != "" || newSpec.SyncTimeout != "" {
+		if err := validateSyncConfig(newSpec, fldPath); err != nil {
+			allErrs = append(allErrs, err...)
+		}
 	}
 
 	// Check immutable fields - only source, syncInterval, and syncTimeout can be changed
-	fldPath := field.NewPath("spec")
-
 	// Check immutable fields in VolumeSpecBase with smart logic for controller defaults
 	if oldSpec.MountPath != newSpec.MountPath && oldSpec.MountPath != "" {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("mountPath"), newSpec.MountPath, ErrFieldImmutable))
@@ -606,7 +657,8 @@ func compareNfsServerSpecsWithDefaults(old, new *svv1alpha1.NfsServerSpec) bool 
 	// Allow controller to set defaults when fields were empty
 	nameEqual := old.Name == new.Name
 	namespaceEqual := old.Namespace == new.Namespace
-	urlEqual := old.URL == new.URL
+	// Allow controller to set URL when it was empty (for managed NFS servers)
+	urlEqual := old.URL == new.URL || (old.URL == "" && new.URL != "")
 	imageEqual := old.Image == new.Image
 
 	// Allow controller to set Path default when it was empty

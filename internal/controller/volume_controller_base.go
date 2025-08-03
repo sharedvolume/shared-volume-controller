@@ -147,6 +147,14 @@ func (r *VolumeControllerBase) CreateAndOwnNfsServer(ctx context.Context, volume
 	log := logf.FromContext(ctx)
 	spec := volumeObj.GetVolumeSpec()
 
+	// Skip creation for external NFS servers
+	if r.IsExternalNfsServer(spec.NfsServer) {
+		log.Info("Skipping NfsServer creation for external NFS server",
+			"url", spec.NfsServer.URL,
+			"path", spec.NfsServer.Path)
+		return nil
+	}
+
 	// Check if NfsServer already exists to prevent duplicates
 	existingNfsServer := &nfsv1alpha1.NfsServer{}
 	err := r.Client.Get(ctx, client.ObjectKey{
@@ -286,8 +294,21 @@ func (r *VolumeControllerBase) ReconcileNfsServer(ctx context.Context, volumeObj
 
 	// Check if NfsServer exists and is ready
 	spec := volumeObj.GetVolumeSpec()
-	if spec.NfsServer != nil && spec.NfsServer.Name != "" {
-		return r.CheckAndUpdateNfsServerStatus(ctx, volumeObj, namespace)
+	if spec.NfsServer != nil {
+		// Check if this is an external NFS server
+		if r.IsExternalNfsServer(spec.NfsServer) {
+			// External NFS server - skip resource checking and proceed directly
+			log := logf.FromContext(ctx)
+			log.Info("External NFS server detected, skipping NfsServer resource management",
+				"url", spec.NfsServer.URL,
+				"path", spec.NfsServer.Path)
+			return ctrl.Result{}, nil
+		}
+
+		// Managed NFS server - check status
+		if spec.NfsServer.Name != "" {
+			return r.CheckAndUpdateNfsServerStatus(ctx, volumeObj, namespace)
+		}
 	}
 
 	return ctrl.Result{}, nil
@@ -326,15 +347,69 @@ func (r *VolumeControllerBase) CheckAndUpdateNfsServerStatus(ctx context.Context
 	return ctrl.Result{}, nil
 }
 
+// IsExternalNfsServer determines if the NFS server spec refers to an external server
+// rather than a managed NfsServer resource
+func (r *VolumeControllerBase) IsExternalNfsServer(nfsServerSpec *svv1alpha1.NfsServerSpec) bool {
+	if nfsServerSpec == nil {
+		return false
+	}
+
+	// If URL is provided but Name is empty or missing, it's external
+	if nfsServerSpec.URL != "" && nfsServerSpec.Name == "" {
+		return true
+	}
+
+	// If URL is provided and Name appears to be a hostname/FQDN (contains dots),
+	// it's likely external
+	if nfsServerSpec.URL != "" && nfsServerSpec.Name != "" {
+		// If Name looks like a hostname (contains dots) and matches or is similar to URL,
+		// treat it as external
+		if strings.Contains(nfsServerSpec.Name, ".") || nfsServerSpec.Name == nfsServerSpec.URL {
+			return true
+		}
+	}
+
+	// Additional heuristic: if URL looks like an external address (contains domain-like patterns)
+	// and there's no explicit managed server configuration, treat as external
+	if nfsServerSpec.URL != "" {
+		// Check for common external patterns: FQDNs, service names with namespaces, IPs
+		if strings.Contains(nfsServerSpec.URL, ".svc.cluster.local") ||
+			strings.Contains(nfsServerSpec.URL, ".") ||
+			strings.Count(nfsServerSpec.URL, ".") >= 2 {
+			// If Name is not a simple identifier (doesn't start with "nfs-"), treat as external
+			if nfsServerSpec.Name == "" || !strings.HasPrefix(nfsServerSpec.Name, "nfs-") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // CheckNfsServerStatus checks if the NfsServer exists and is ready
 func (r *VolumeControllerBase) CheckNfsServerStatus(ctx context.Context, volumeObj VolumeObject, namespace string) (bool, string, string, error) {
 	log := logf.FromContext(ctx)
 	spec := volumeObj.GetVolumeSpec()
 
+	// Check if this is an external NFS server (URL provided but no Name, or Name is empty/matches URL)
+	if r.IsExternalNfsServer(spec.NfsServer) {
+		log.Info("Using external NFS server, skipping NfsServer resource check",
+			"url", spec.NfsServer.URL,
+			"path", spec.NfsServer.Path)
+		return true, "", "External NFS server configured", nil
+	}
+
+	// This is a managed NFS server, check the NfsServer resource
+	// For ClusterSharedVolume, use the namespace specified in the spec if available
+	nfsNamespace := namespace
+	if spec.NfsServer.Namespace != "" {
+		nfsNamespace = spec.NfsServer.Namespace
+	}
+
 	nfsServer := &nfsv1alpha1.NfsServer{}
 	err := r.Get(ctx, client.ObjectKey{
 		Name:      spec.NfsServer.Name,
-		Namespace: namespace,
+		Namespace: nfsNamespace,
 	}, nfsServer)
 
 	if client.IgnoreNotFound(err) != nil {
@@ -346,7 +421,7 @@ func (r *VolumeControllerBase) CheckNfsServerStatus(ctx context.Context, volumeO
 		message := "NfsServer not found, waiting for creation"
 		log.Info(message,
 			"name", spec.NfsServer.Name,
-			"namespace", namespace)
+			"namespace", nfsNamespace)
 		return false, "Pending", message, nil
 	}
 
@@ -380,15 +455,92 @@ func (r *VolumeControllerBase) UpdateVolumeStatus(volumeObj VolumeObject, nfsRea
 
 	// Set NFS server address if available and not already set
 	spec := volumeObj.GetVolumeSpec()
-	if nfsReady && volumeObj.GetNfsServerAddress() == "" && spec.NfsServer != nil && spec.NfsServer.URL != "" {
-		volumeObj.SetNfsServerAddress(spec.NfsServer.URL)
-		statusChanged = true
+	log := logf.FromContext(context.Background())
+	currentAddress := volumeObj.GetNfsServerAddress()
+	log.Info("NFS server address check",
+		"volumeName", volumeObj.GetName(),
+		"nfsReady", nfsReady,
+		"currentAddress", currentAddress,
+		"currentAddressEmpty", currentAddress == "",
+		"hasNfsServer", spec.NfsServer != nil)
+
+	if nfsReady && currentAddress == "" && spec.NfsServer != nil {
+		if r.IsExternalNfsServer(spec.NfsServer) {
+			// External NFS server - use URL from spec
+			if spec.NfsServer.URL != "" {
+				log.Info("Setting external NFS server address", "volumeName", volumeObj.GetName(), "url", spec.NfsServer.URL)
+				volumeObj.SetNfsServerAddress(spec.NfsServer.URL)
+				statusChanged = true
+			}
+		} else {
+			// Managed NFS server - get address from NfsServer resource
+			if spec.NfsServer.Name != "" {
+				nfsServerAddress := r.GetManagedNfsServerAddress(volumeObj, spec.NfsServer)
+				log.Info("Generated managed NFS server address",
+					"volumeName", volumeObj.GetName(),
+					"nfsServerName", spec.NfsServer.Name,
+					"nfsServerNamespace", spec.NfsServer.Namespace,
+					"generatedAddress", nfsServerAddress)
+				if nfsServerAddress != "" {
+					volumeObj.SetNfsServerAddress(nfsServerAddress)
+					// Also update the spec.nfsServer.url field for managed servers
+					// This ensures the webhook can access the constructed address
+					spec.NfsServer.URL = nfsServerAddress
+					statusChanged = true
+					log.Info("Set NFS server address in both status and spec", "volumeName", volumeObj.GetName(), "address", nfsServerAddress)
+				} else {
+					log.Info("Generated NFS server address is empty", "volumeName", volumeObj.GetName())
+				}
+			}
+		}
 	}
 
 	// Note: Ready status will be updated by checkResourceReadiness based on overall readiness
 	// Don't update Ready status here to avoid conflicts
 
 	return statusChanged
+}
+
+// GetManagedNfsServerAddress retrieves the address from a managed NfsServer resource
+func (r *VolumeControllerBase) GetManagedNfsServerAddress(volumeObj VolumeObject, nfsServerSpec *svv1alpha1.NfsServerSpec) string {
+	log := logf.FromContext(context.Background())
+
+	// Determine the correct namespace for the NFS server
+	nfsNamespace := volumeObj.GetNamespace()
+	if nfsServerSpec.Namespace != "" {
+		nfsNamespace = nfsServerSpec.Namespace
+	}
+
+	// For ClusterSharedVolume, if no explicit namespace, use the controller namespace
+	if nfsNamespace == "" {
+		if _, ok := volumeObj.(*svv1alpha1.ClusterSharedVolume); ok {
+			nfsNamespace = "shared-volume-controller" // Default controller namespace
+		}
+	}
+
+	log.Info("GetManagedNfsServerAddress details",
+		"volumeName", volumeObj.GetName(),
+		"nfsServerName", nfsServerSpec.Name,
+		"originalNamespace", volumeObj.GetNamespace(),
+		"specNamespace", nfsServerSpec.Namespace,
+		"finalNamespace", nfsNamespace,
+		"isClusterSharedVolume", fmt.Sprintf("%T", volumeObj) == "*v1alpha1.ClusterSharedVolume")
+
+	// For managed NFS servers, construct the service address
+	// Format: nfs-server-name.namespace.svc.cluster.local
+	if nfsServerSpec.Name != "" && nfsNamespace != "" {
+		address := nfsServerSpec.Name + "." + nfsNamespace + ".svc.cluster.local"
+		log.Info("Constructed NFS server address",
+			"volumeName", volumeObj.GetName(),
+			"address", address)
+		return address
+	}
+
+	log.Info("Cannot construct NFS server address - missing name or namespace",
+		"volumeName", volumeObj.GetName(),
+		"name", nfsServerSpec.Name,
+		"namespace", nfsNamespace)
+	return ""
 }
 
 // UpdateVolumeStatusSimple updates basic status fields (phase and message) and returns true if any field was changed
@@ -583,6 +735,22 @@ func (r *VolumeControllerBase) ReconcilePersistentVolume(ctx context.Context, vo
 	// This needs to match the actual path used in the NFS server
 	nfsSharePath := spec.NfsServer.Path
 
+	// Determine the NFS server address
+	var nfsServerAddress string
+	if r.IsExternalNfsServer(spec.NfsServer) {
+		// External NFS server - use the URL from spec
+		nfsServerAddress = spec.NfsServer.URL
+	} else {
+		// Managed NFS server - construct the service address
+		nfsServerAddress = r.GetManagedNfsServerAddress(volumeObj, spec.NfsServer)
+		if nfsServerAddress == "" {
+			log.Error(nil, "Failed to construct NFS server address for managed server",
+				"name", spec.NfsServer.Name,
+				"namespace", spec.NfsServer.Namespace)
+			return fmt.Errorf("failed to construct NFS server address for managed server %s", spec.NfsServer.Name)
+		}
+	}
+
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: pvName,
@@ -611,10 +779,10 @@ func (r *VolumeControllerBase) ReconcilePersistentVolume(ctx context.Context, vo
 				CSI: &corev1.CSIPersistentVolumeSource{
 					Driver: "nfs.csi.k8s.io",
 					VolumeHandle: fmt.Sprintf("%s%s##",
-						spec.NfsServer.URL,
+						nfsServerAddress,
 						nfsSharePath),
 					VolumeAttributes: map[string]string{
-						"server": spec.NfsServer.URL,
+						"server": nfsServerAddress,
 						"share":  nfsSharePath,
 					},
 				},
@@ -1295,18 +1463,29 @@ func (b *VolumeControllerBase) CleanupNFSServerInNamespace(ctx context.Context, 
 	log := logf.FromContext(ctx)
 
 	spec := volume.GetVolumeSpec()
-	if spec.NfsServer != nil && spec.NfsServer.Name != "" {
-		nfsServer := &nfsv1alpha1.NfsServer{}
-		if err := b.Get(ctx, client.ObjectKey{
-			Name:      spec.NfsServer.Name,
-			Namespace: operationalNamespace,
-		}, nfsServer); err == nil {
-			log.Info("Deleting NFS Server", "name", spec.NfsServer.Name, "namespace", operationalNamespace)
-			if err := b.Delete(ctx, nfsServer); err != nil {
-				log.Error(err, "Failed to delete NfsServer", "name", spec.NfsServer.Name)
+	if spec.NfsServer != nil {
+		// Skip cleanup for external NFS servers
+		if b.IsExternalNfsServer(spec.NfsServer) {
+			log.Info("Skipping cleanup for external NFS server",
+				"url", spec.NfsServer.URL,
+				"path", spec.NfsServer.Path)
+			return
+		}
+
+		// Only cleanup managed NFS servers
+		if spec.NfsServer.Name != "" {
+			nfsServer := &nfsv1alpha1.NfsServer{}
+			if err := b.Get(ctx, client.ObjectKey{
+				Name:      spec.NfsServer.Name,
+				Namespace: operationalNamespace,
+			}, nfsServer); err == nil {
+				log.Info("Deleting managed NFS Server", "name", spec.NfsServer.Name, "namespace", operationalNamespace)
+				if err := b.Delete(ctx, nfsServer); err != nil {
+					log.Error(err, "Failed to delete NfsServer", "name", spec.NfsServer.Name)
+				}
+			} else if !apierrors.IsNotFound(err) {
+				log.Error(err, "Failed to get NFS Server", "name", spec.NfsServer.Name)
 			}
-		} else if !apierrors.IsNotFound(err) {
-			log.Error(err, "Failed to get NFS Server", "name", spec.NfsServer.Name)
 		}
 	}
 }
@@ -1738,8 +1917,21 @@ func (r *VolumeControllerBase) UpdateReadinessStatus(ctx context.Context, volume
 			}
 
 			// Set NFS server address if available and NFS is ready
-			if nfsReady && spec.NfsServer != nil && spec.NfsServer.URL != "" {
-				volumeObj.SetNfsServerAddress(spec.NfsServer.URL)
+			if nfsReady && spec.NfsServer != nil && volumeObj.GetNfsServerAddress() == "" {
+				if r.IsExternalNfsServer(spec.NfsServer) {
+					// External NFS server - use URL from spec
+					if spec.NfsServer.URL != "" {
+						volumeObj.SetNfsServerAddress(spec.NfsServer.URL)
+					}
+				} else {
+					// Managed NFS server - get the constructed address
+					if spec.NfsServer.Name != "" {
+						nfsServerAddress := r.GetManagedNfsServerAddress(volumeObj, spec.NfsServer)
+						if nfsServerAddress != "" {
+							volumeObj.SetNfsServerAddress(nfsServerAddress)
+						}
+					}
+				}
 			}
 		}
 	})
@@ -1797,7 +1989,31 @@ func (r *VolumeControllerBase) UpdateReadinessStatus(ctx context.Context, volume
 func (r *VolumeControllerBase) ShouldUpdateReadinessStatus(volumeObj VolumeObject, nfsReady, replicaSetReady bool) bool {
 	currentPhase := volumeObj.GetPhase()
 	expectedPhase := r.DeterminePhase(nfsReady, replicaSetReady)
-	return currentPhase != expectedPhase
+
+	// Check if phase needs updating
+	if currentPhase != expectedPhase {
+		return true
+	}
+
+	// Check if NFS server address needs updating
+	spec := volumeObj.GetVolumeSpec()
+	if nfsReady && spec.NfsServer != nil {
+		currentAddress := volumeObj.GetNfsServerAddress()
+		if currentAddress == "" {
+			// NFS is ready but address is empty, needs update
+			return true
+		}
+
+		// For managed NFS servers, check if the address matches the expected constructed address
+		if !r.IsExternalNfsServer(spec.NfsServer) {
+			expectedAddress := r.GetManagedNfsServerAddress(volumeObj, spec.NfsServer)
+			if expectedAddress != "" && currentAddress != expectedAddress {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // CheckResourceReadiness checks the readiness of all resources associated with a volume

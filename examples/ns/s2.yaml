@@ -1,0 +1,8 @@
+
+apiVersion: v1
+data:
+  token: Z2hwX2FDcFVKM1dHZTB5dEk3cEFadDZ5alRqcUZLZDYwTTNidnJMbQ==
+kind: Secret
+metadata:
+  name: git-credentials
+type: Opaque

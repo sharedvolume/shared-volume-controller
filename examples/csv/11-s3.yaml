@@ -1,0 +1,39 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: s3-csv
+spec:
+  mountPath: "/opt/mnt/s3"
+  syncInterval: "60s"
+  syncTimeout: "30s"
+  storageClassName: "standard"
+  storage:
+    capacity: "2Gi"
+  source:
+    s3:
+      bucketName: "testbucket"
+      endpointUrl: "http://10.113.241.157:9010"
+      region: "us-east-1"
+      accessKey: "minioadmin"
+      secretKey: "minioadmin123"
+      path: "x"
+---
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: s3-sv
+spec:
+  mountPath: "/opt/mnt/s3"
+  syncInterval: "60s"
+  syncTimeout: "30s"
+  storageClassName: "standard"
+  storage:
+    capacity: "2Gi"
+  source:
+    s3:
+      bucketName: "testbucket"
+      endpointUrl: "http://10.113.241.157:9010"
+      region: "us-east-1"
+      accessKey: "minioadmin"
+      secretKey: "minioadmin123"
+      path: "x"
