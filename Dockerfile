@@ -26,6 +26,16 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/static:nonroot
+
+# Add labels for container metadata
+LABEL maintainer="Bilgehan NAL bilgehan.nal@gmail.com"
+LABEL org.opencontainers.image.title="Shared Volume Controller"
+LABEL org.opencontainers.image.description="A Kubernetes operator for managing shared volumes with NFS server integration"
+LABEL org.opencontainers.image.url="https://github.com/sharedvolume/shared-volume-controller"
+LABEL org.opencontainers.image.source="https://github.com/sharedvolume/shared-volume-controller"
+LABEL org.opencontainers.image.vendor="SharedVolume"
+LABEL org.opencontainers.image.licenses="MIT"
+
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532

@@ -1,15 +1,22 @@
 version: "2"
 run:
   allow-parallel-runners: true
+  timeout: 5m
+  go: '1.24'
+
 linters:
   default: none
   enable:
+    - bodyclose
     - copyloopvar
     - dupl
     - errcheck
     - ginkgolinter
     - goconst
     - gocyclo
+    - gofmt
+    - goimports
+    - gosec
     - govet
     - ineffassign
     - lll
@@ -21,25 +28,43 @@ linters:
     - unconvert
     - unparam
     - unused
-  settings:
-    revive:
-      rules:
-        - name: comment-spacings
-        - name: import-shadowing
-  exclusions:
-    generated: lax
+
+linters-settings:
+  gocyclo:
+    min-complexity: 15
+  lll:
+    line-length: 120
+  revive:
     rules:
-      - linters:
-          - lll
-        path: api/*
-      - linters:
-          - dupl
-          - lll
-        path: internal/*
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
+      - name: comment-spacings
+      - name: import-shadowing
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - dupl
+        - gocyclo
+    - path: cmd/
+      linters:
+        - gocyclo
+    - path: api/
+      linters:
+        - lll
+    - path: internal/
+      linters:
+        - dupl
+        - lll
+    - path: third_party
+      linters:
+        - gosec
+    - path: builtin
+      linters:
+        - gosec
+    - path: examples
+      linters:
+        - gosec
+
 formatters:
   enable:
     - gofmt
