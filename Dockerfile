@@ -28,7 +28,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 FROM gcr.io/distroless/static:nonroot
 
 # Add labels for container metadata
-LABEL maintainer="Bilgehan NAL bilgehan.nal@gmail.com"
+LABEL maintainer="SharedVolume Team info@sharedvolume.io"
 LABEL org.opencontainers.image.title="Shared Volume Controller"
 LABEL org.opencontainers.image.description="A Kubernetes operator for managing shared volumes with NFS server integration"
 LABEL org.opencontainers.image.url="https://github.com/sharedvolume/shared-volume-controller"

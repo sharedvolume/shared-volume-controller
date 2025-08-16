@@ -12,89 +12,59 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
-    
     steps:
-    - name: Checkout code
+    - name: Checkout
       uses: actions/checkout@v4
-      
+      with:
+        fetch-depth: 0
+
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version: '1.24'
-        
-    - name: Extract version from tag
+
+    - name: Get version
       id: version
       run: |
-        # Remove 'v' prefix if present and set version
+        # Get version from tag, removing 'v' prefix if present
         VERSION=${GITHUB_REF#refs/tags/}
         VERSION=${VERSION#v}
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "Version: $VERSION"
-        
-    - name: Run tests
-      run: |
-        go mod download
-        go test -v ./...
-        
-    - name: Build binary
-      run: |
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o manager cmd/main.go
-        
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Version: ${VERSION}"
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-  
-    - name: Login to Docker Hub
+
+    - name: Log in to Docker Hub
       uses: docker/login-action@v3
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
-        
+
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
+        file: ./Dockerfile
         platforms: linux/amd64,linux/arm64
         push: true
-        build-args: |
-          BUILD_DATE=${{ github.event.head_commit.timestamp }}
-          GIT_COMMIT=${{ github.sha }}
         tags: |
           sharedvolume/shared-volume-controller:${{ steps.version.outputs.version }}
           sharedvolume/shared-volume-controller:latest
-        labels: |
-          org.opencontainers.image.title=Shared Volume Controller
-          org.opencontainers.image.description=A Kubernetes operator for managing shared volumes with NFS server integration
-          org.opencontainers.image.version=${{ steps.version.outputs.version }}
-          org.opencontainers.image.source=${{ github.repositoryUrl }}
-          org.opencontainers.image.revision=${{ github.sha }}
-          org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
-          org.opencontainers.image.licenses=MIT
-          
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v1
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Generate manifests
+      run: |
+        make manifests
+        make build-installer IMG=sharedvolume/shared-volume-controller:${{ steps.version.outputs.version }}
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          dist/install.yaml
+        generate_release_notes: true
+        make_latest: true
       env:
         GITHUB_TOKEN: ${{ secrets.REPO_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        name: Release ${{ steps.version.outputs.version }}
-        body: |
-          ## Changes in this Release
-          
-          ### Docker Images
-          - `sharedvolume/shared-volume-controller:${{ steps.version.outputs.version }}`
-          - `sharedvolume/shared-volume-controller:latest`
-          
-          ### Installation
-          ```bash
-          docker pull sharedvolume/shared-volume-controller:${{ steps.version.outputs.version }}
-          ```
-          
-          ### Kubernetes Deployment
-          ```bash
-          kubectl apply -f https://github.com/sharedvolume/shared-volume-controller/releases/download/${{ steps.version.outputs.version }}/install.yaml
-          ```
-          
-          For detailed changelog, see the commit history.
-        draft: false
-        prerelease: false

@@ -19,7 +19,7 @@ Please do not report security vulnerabilities through public GitHub issues.
 
 ### 2. Send a private report
 
-Email security details to: **bilgehan.nal@gmail.com**
+Email security details to: **security@sharedvolume.io**
 
 Include the following information:
 - Description of the vulnerability

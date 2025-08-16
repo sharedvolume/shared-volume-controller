@@ -15,7 +15,7 @@ spec:
       port: 22
       user: "user2"
       password: "password1"
-      path: "/opt/bilgehan"
+      path: "/opt/demo"
 ---
 apiVersion: sv.sharedvolume.io/v1alpha1
 kind: SharedVolume
@@ -34,4 +34,4 @@ spec:
       port: 22
       user: "user2"
       password: "password1"
-      path: "/opt/bilgehan"
+      path: "/opt/demo"
