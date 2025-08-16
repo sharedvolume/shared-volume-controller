@@ -39,8 +39,6 @@ Thumbs.db
 
 # Local development
 bin/
-!bin/kustomize*
-!bin/controller-gen*
 testbin/
 dist/
 
