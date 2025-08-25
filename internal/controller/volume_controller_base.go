@@ -772,7 +772,14 @@ func (r *VolumeControllerBase) ReconcilePersistentVolume(ctx context.Context, vo
 			},
 			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
 			MountOptions: []string{
-				"nfsvers=4.1",
+				"nfsvers=4.1",   // Use NFSv4.1 (better recovery & locking)
+				"hard",          // Keep retrying instead of failing I/O
+				"intr",          // Allow signals to interrupt stuck NFS calls
+				"rsize=1048576", // 1MB read buffer size
+				"wsize=1048576", // 1MB write buffer size
+				"timeo=600",     // Timeout (in tenths of a second = 60s)
+				"retrans=3",     // Retransmit count before backoff
+				"noatime",       // skip access-time updates for performance
 			},
 			StorageClassName: "",
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
