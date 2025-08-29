@@ -3,7 +3,7 @@ kind: Pod
 metadata:
   name: csv-single
   annotations:
-    sharedvolume.csv: "http-nfs-name"
+    sharedvolume.csv: "http-csv"
   labels:
     app: complex-multi-test
 spec:
