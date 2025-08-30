@@ -1,0 +1,25 @@
+# Test Namespaces
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: "sv-csv-test-ns-1"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: "sv-csv-test-ns-2"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: "sv-csv-test-ns-3"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: "sv-csv-test-ns-4"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: "sv-csv-test-ns-5"

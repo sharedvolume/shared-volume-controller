@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-sample-pod
+  namespace: default
+  annotations:
+    # Use lowercase 'sharedvolume.io' instead of 'sharedVolume.io'
+    sharedvolume.io/sv/sharedvolume-sample: "true"
+spec:
+  containers:
+    - name: nginx
+      image: nginx:1.21
+      ports:
+        - containerPort: 80
+      # The webhook will automatically add volume mounts here
+      # volumeMounts:
+      #   - mountPath: /mnt/shared
+      #     name: sharedvolume-sample-ref
+      #     readOnly: false
+  # The webhook will automatically add volumes here
+  # volumes:
+  #   - name: sharedvolume-sample-ref
+  #     persistentVolumeClaim:
+  #       claimName: sharedvolume-sample-ref-default

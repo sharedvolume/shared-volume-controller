@@ -1,0 +1,135 @@
+# Example SharedVolume configurations for all source types
+
+---
+# SSH Source Example
+apiVersion: sv.v1alpha1
+kind: SharedVolume
+metadata:
+  name: ssh-example
+  namespace: default
+spec:
+  mountPath: /data/ssh
+  syncInterval: 30s
+  syncTimeout: 120s
+  source:
+    ssh:
+      host: "example.com"
+      port: 22
+      user: "myuser"
+      password: "mypassword"  # or use privateKey
+      path: "/remote/data"
+  storage:
+    capacity: 1Gi
+    accessMode: ReadWrite
+  referenceValue: "ssh-sync-server"
+
+---
+# HTTP Source Example
+apiVersion: sv.v1alpha1
+kind: SharedVolume
+metadata:
+  name: http-example
+  namespace: default
+spec:
+  mountPath: /data/http
+  syncInterval: 1m
+  syncTimeout: 60s
+  source:
+    http:
+      url: "https://example.com/files.tar.gz"
+  storage:
+    capacity: 2Gi
+    accessMode: ReadWrite
+  referenceValue: "http-sync-server"
+
+---
+# Git Source Example
+apiVersion: sv.v1alpha1
+kind: SharedVolume
+metadata:
+  name: git-example
+  namespace: default
+spec:
+  mountPath: /data/git
+  syncInterval: 5m
+  syncTimeout: 180s
+  source:
+    git:
+      url: "https://github.com/user/repo.git"
+      user: "username"
+      password: "token"
+      branch: "main"
+  storage:
+    capacity: 5Gi
+    accessMode: ReadWrite
+  referenceValue: "git-sync-server"
+
+---
+# S3 Source Example
+apiVersion: sv.v1alpha1
+kind: SharedVolume
+metadata:
+  name: s3-example
+  namespace: default
+spec:
+  mountPath: /data/s3
+  syncInterval: 10m
+  syncTimeout: 300s
+  source:
+    s3:
+      endpointUrl: "https://s3.amazonaws.com"
+      bucketName: "my-bucket"
+      path: "/data/folder"
+      accessKey: "AKIAIOSFODNN7EXAMPLE"
+      secretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+      region: "us-west-2"
+  storage:
+    capacity: 10Gi
+    accessMode: ReadWrite
+  referenceValue: "s3-sync-server"
+
+---
+# SSH with Private Key from Secret Example
+apiVersion: sv.v1alpha1
+kind: SharedVolume
+metadata:
+  name: ssh-with-secret
+  namespace: default
+spec:
+  mountPath: /data/ssh-secret
+  syncInterval: 30s
+  syncTimeout: 120s
+  source:
+    ssh:
+      host: "example.com"
+      port: 22
+      user: "myuser"
+      path: "/remote/data"
+      privateKeyFromSecret:
+        name: "ssh-key-secret"
+        key: "private-key"
+  storage:
+    capacity: 1Gi
+    accessMode: ReadWrite
+  referenceValue: "ssh-secret-sync-server"
+
+---
+# Git with Private Key Example
+apiVersion: sv.v1alpha1
+kind: SharedVolume
+metadata:
+  name: git-with-key
+  namespace: default
+spec:
+  mountPath: /data/git-key
+  syncInterval: 5m
+  syncTimeout: 180s
+  source:
+    git:
+      url: "git@github.com:user/private-repo.git"
+      privateKey: "LS0tLS1CRUdJTiBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0K..."  # base64 encoded private key
+      branch: "develop"
+  storage:
+    capacity: 3Gi
+    accessMode: ReadWrite
+  referenceValue: "git-key-sync-server"

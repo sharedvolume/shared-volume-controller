@@ -1,0 +1,272 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: sharedvolumes.sv.sharedvolume.io
+spec:
+  group: sv.sharedvolume.io
+  names:
+    kind: SharedVolume
+    listKind: SharedVolumeList
+    plural: sharedvolumes
+    shortNames:
+    - sv
+    singular: sharedvolume
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: Current Phase
+      jsonPath: .status.phase
+      name: Phase
+      type: string
+    - description: NFS Server Address
+      jsonPath: .status.nfsServerAddress
+      name: NFS Address
+      type: string
+    - description: Mount Path
+      jsonPath: .spec.mountPath
+      name: Mount Path
+      type: string
+    - description: Sync Interval
+      jsonPath: .spec.syncInterval
+      name: SyncInterval
+      type: string
+    - description: Storage Capacity
+      jsonPath: .spec.storage.capacity
+      name: Capacity
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: SharedVolume is the Schema for the sharedvolumes API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SharedVolumeSpec defines the desired state of SharedVolume.
+            properties:
+              mountPath:
+                type: string
+              nfsServer:
+                description: NfsServerSpec defines the NFS server configuration.
+                properties:
+                  image:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  path:
+                    type: string
+                  url:
+                    type: string
+                type: object
+              referenceValue:
+                type: string
+              resourceNamespace:
+                type: string
+              source:
+                description: VolumeSourceSpec defines the source for the shared volume.
+                properties:
+                  git:
+                    description: GitSourceSpec defines Git source configuration.
+                    properties:
+                      branch:
+                        type: string
+                      password:
+                        type: string
+                      passwordFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      privateKey:
+                        type: string
+                      privateKeyFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      url:
+                        type: string
+                      user:
+                        type: string
+                    required:
+                    - url
+                    type: object
+                  http:
+                    description: HTTPSourceSpec defines HTTP source configuration.
+                    properties:
+                      url:
+                        type: string
+                    required:
+                    - url
+                    type: object
+                  s3:
+                    description: S3SourceSpec defines S3 source configuration.
+                    properties:
+                      accessKey:
+                        type: string
+                      accessKeyFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      bucketName:
+                        type: string
+                      endpointUrl:
+                        type: string
+                      path:
+                        type: string
+                      region:
+                        type: string
+                      secretKey:
+                        type: string
+                      secretKeyFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    required:
+                    - bucketName
+                    - endpointUrl
+                    - region
+                    type: object
+                  ssh:
+                    description: SSHSourceSpec defines SSH source configuration.
+                    properties:
+                      host:
+                        type: string
+                      password:
+                        type: string
+                      passwordFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      path:
+                        type: string
+                      port:
+                        type: integer
+                      privateKey:
+                        type: string
+                      privateKeyFromSecret:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      user:
+                        type: string
+                    required:
+                    - host
+                    type: object
+                type: object
+              storage:
+                description: StorageSpec defines storage configuration.
+                properties:
+                  accessMode:
+                    type: string
+                  capacity:
+                    type: string
+                required:
+                - capacity
+                type: object
+              storageClassName:
+                type: string
+              syncInterval:
+                type: string
+              syncTimeout:
+                type: string
+            required:
+            - mountPath
+            type: object
+          status:
+            description: SharedVolumeStatus defines the observed state of SharedVolume.
+            properties:
+              message:
+                description: Message provides additional information about the current
+                  phase
+                type: string
+              nfsServerAddress:
+                description: NfsServerAddress is the address where the NFS server
+                  can be accessed
+                type: string
+              persistentVolumeClaimName:
+                description: PersistentVolumeClaimName is the name of the associated
+                  PVC
+                type: string
+              persistentVolumeName:
+                description: PersistentVolumeName is the name of the associated PV
+                type: string
+              phase:
+                description: Phase indicates the current phase of the SharedVolume
+                  (Pending, Preparing, Ready)
+                type: string
+              serviceName:
+                description: ServiceName is the name of the associated Service
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,26 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: sharedvolume-default-path
+  namespace: default
+spec:
+  # This example has an nfsServer without specifying the path
+  # The controller will default the path to "/"
+  nfsServer:
+    name: default-path-nfs-server
+    namespace: default
+    url: default-path-nfs-server.default.svc.cluster.local
+    # path is intentionally not specified and will default to "/"
+  mountPath: /mnt/default-path
+  syncInterval: 60s
+  storage:
+    capacity: 8Gi
+    accessMode: ReadWrite
+  source:
+    ssh:
+      host: storage.example.com
+      username: storageuser
+      path: /storage/data
+      privateKeyFromSecret:
+        name: ssh-storage-secret
+        key: id_rsa

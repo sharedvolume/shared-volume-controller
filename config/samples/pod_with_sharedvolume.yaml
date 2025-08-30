@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod-with-shared-volume
+  namespace: default
+  annotations:
+    # This annotation tells the webhook to mount the 'my-shared-volume' SharedVolume
+    sharedvolume.io/sv/my-shared-volume: "true"
+    # You can mount multiple shared volumes by adding more annotations
+    # sharedvolume.io/sv/another-volume: "true"
+spec:
+  containers:
+    - name: test-container
+      image: nginx:latest
+      ports:
+        - containerPort: 80
+      # The webhook will automatically add volume mounts here based on the annotations
+      # Example of what gets added:
+      # volumeMounts:
+      #   - mountPath: /mnt/shared  # From SharedVolume.Spec.MountPath
+      #     name: test-ref          # From SharedVolume.Spec.ReferenceValue
+      #     readOnly: false         # Based on SharedVolume.Spec.Storage.AccessMode
+  # The webhook will automatically add volumes here
+  # Example of what gets added:
+  # volumes:
+  #   - name: test-ref-default      # {ReferenceValue}-{PodNamespace}
+  #     persistentVolumeClaim:
+  #       claimName: test-ref       # From SharedVolume.Spec.ReferenceValue

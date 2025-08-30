@@ -1,0 +1,27 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: cluster-shared-volume-sample
+  labels:
+    app.kubernetes.io/name: clustersharedvolume
+    app.kubernetes.io/instance: cluster-shared-volume-sample
+    app.kubernetes.io/part-of: shared-volume-controller
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: shared-volume-controller
+spec:
+  # Storage configuration
+  storage:
+    capacity: "10Gi"
+    storageClassName: "standard"
+    accessModes:
+      - ReadWriteMany
+  
+  # Mount path inside the pod
+  mountPath: "/shared-data"
+  
+  # NFS server configuration - let the controller create and manage it
+  # nfsServer: null  # This will be auto-generated
+  
+  # Sync configuration (optional)
+  syncInterval: "5m"
+  syncEnabled: true

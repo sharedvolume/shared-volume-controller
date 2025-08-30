@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: alpine-sample-pod-3
+  annotations:
+    sharedvolume.sv/sharedvolume-with-sync: "true"
+  labels:
+    app: alpine-sample
+spec:
+  containers:
+  - name: alpine
+    image: alpine:3.18
+    command: ["/bin/sh", "-c", "while true; do echo Hello from Alpine; sleep 300; done"]
+    resources:
+      requests:
+        memory: "8Mi"
+        cpu: "50m"
+      limits:
+        memory: "16Mi"
+        cpu: "100m"
+  automountServiceAccountToken: false

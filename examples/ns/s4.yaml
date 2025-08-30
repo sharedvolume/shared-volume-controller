@@ -1,0 +1,9 @@
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3
+  namespace: "sv-csv-test-ns-1"
+data:
+  accessKey: "bWluaW9hZG1pbg=="
+  secretKey: "bWluaW9hZG1pbjEyMw=="

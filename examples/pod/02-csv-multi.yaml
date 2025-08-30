@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tcsv-multi
+  annotations:
+    sharedvolume.csv: "http-csv,success-nosource-csv-1"
+  labels:
+    app: complex-multi-test
+spec:
+  containers:
+  - name: alpine
+    image: alpine:3.18
+    command: ["/bin/sh", "-c", "while true; do echo 'Testing complex multi-source scenario'; find /opt/mnt -type d -name '*' | head -20; sleep 60; done"]
+    resources:
+      requests:
+        memory: "32Mi"
+        cpu: "100m"
+      limits:
+        memory: "64Mi"
+        cpu: "300m"
+  automountServiceAccountToken: false

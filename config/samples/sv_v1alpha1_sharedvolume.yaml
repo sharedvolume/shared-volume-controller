@@ -1,0 +1,31 @@
+apiVer  nfsServer:
+    name: nfs-server
+    namespace: default
+    url: nfs-server.default.svc.cluster.local
+    path: /exports # This is the export path on the NFS server, defaults to "/" if not specified sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: sharedvolume-sample
+  namespace: default
+spec:
+  nfsServer:
+    type: object # This could be 'object' or 'external'
+    name: nfs-server
+    namespace: default
+    url: nfs-server.default.svc.cluster.local # if type is 'object' url is required
+  mountPath: /mnt/shared 
+  syncInterval: 60s # Interval to sync the shared volume, default is 60 seconds
+  storageClassName: nfs-client # This is required if type is 'object' and name and namespace are not provided
+  storage: # This is optional, if not provided the default capacity will be used
+    capacity: 10Gi # This is the storage capacity, this is required
+    accessMode: ReadWrite # This is the access mode, default is ReadOnly, could be ReadWrite or ReadOnly
+  source:
+    ssh:
+      host: ssh.example.com
+      port: 22 # optional, default is 22
+      username: user # optional, default is 'root'
+      privateKey: xxxxxx # This is the private key content base64 encoded, this is optional
+      path: /path/to/shared/volume # This is the path to the shared volume on the SSH server default is '/nfs'
+      privateKeyFromSecret: # This is optional, if provided the privateKey field will be ignored
+        name: ssh-secret
+        key: privateKey

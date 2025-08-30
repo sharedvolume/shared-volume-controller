@@ -1,0 +1,25 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: sharedvolume-with-path
+  namespace: default
+spec:
+  # This example explicitly specifies an nfsServer with a custom path
+  nfsServer:
+    name: custom-nfs-server
+    namespace: default
+    url: custom-nfs-server.default.svc.cluster.local
+    path: /exports/customer-data
+  mountPath: /mnt/shared-data
+  syncInterval: 30s
+  storage:
+    capacity: 5Gi
+    accessMode: ReadOnly
+  source:
+    ssh:
+      host: data.example.com
+      username: datauser
+      path: /data/customer
+      privateKeyFromSecret:
+        name: ssh-data-secret
+        key: id_rsa

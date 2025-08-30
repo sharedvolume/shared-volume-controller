@@ -1,0 +1,17 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: http-nfs
+spec:
+  mountPath: "/opt/mnt/http1"
+  nfsServer:
+    path: /
+    url: nfs-sv-goazfn8g1e50.sv-csv-test-ns-1.svc.cluster.local
+  syncInterval: "1m"
+  syncTimeout: "30s"
+  storageClassName: "standard"
+  storage:
+    capacity: "1Gi"
+  source:
+    http:
+      url: "https://github.com/distribution/distribution/blob/6affafd1f030087d88f88841bf66a8abe2bf4d24/contrib/apache/README.MD"

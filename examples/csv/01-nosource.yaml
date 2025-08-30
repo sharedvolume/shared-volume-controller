@@ -1,0 +1,23 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: ClusterSharedVolume
+metadata:
+  name: nosource-csv
+spec:
+  mountPath: "/opt/mnt/nosource"
+  syncInterval: "1m"
+  syncTimeout: "30s"
+  storageClassName: "standard"
+  storage:
+    capacity: "1Gi"
+---
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: nosource-sv
+spec:
+  mountPath: "/opt/mnt/nosource"
+  syncInterval: "1m"
+  syncTimeout: "30s"
+  storageClassName: "standard"
+  storage:
+    capacity: "1Gi"

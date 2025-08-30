@@ -1,0 +1,8 @@
+## Append samples of your project ##
+resources:
+- sv_v1alpha1_sharedvolume.yaml
+- sharedvolume1.yaml
+- sharedvolume_with_nfsserver_path.yaml
+- sharedvolume_with_default_path.yaml
+- sharedvolume_with_replicas.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

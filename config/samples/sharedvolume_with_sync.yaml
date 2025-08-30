@@ -1,0 +1,20 @@
+apiVersion: sv.sharedvolume.io/v1alpha1
+kind: SharedVolume
+metadata:
+  name: sharedvolume-with-sync
+  namespace: default
+spec:
+  mountPath: "/data"
+  syncInterval: "30s"      # Sync every 30 seconds
+  syncTimeout: "120s"      # 2 minute timeout for sync operations
+  storage:
+    capacity: "1Gi"
+    accessMode: "ReadWrite"
+  source:
+    ssh:
+      host: "xdev03"
+      port: 22
+      username: "pdm"
+      path: "/opt/sahibinden/data"
+      privateKey: "LS0tLS1CRUdJTiBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0KYjNCbGJuTnphQzFyWlhrdGRqRUFBQUFBQkc1dmJtVUFBQUFFYm05dVpRQUFBQUFBQUFBQkFBQUJsd0FBQUFkemMyZ3RjbgpOaEFBQUFBd0VBQVFBQUFZRUF0K2dGWkJ1SXJNMGFEcFN5eVdVa3JIY09SWkFqTWRlaUNabm0zeGpmZ0VvR1hqajNKbWdPCnV3QUFBQTdPcW0rOWpxcHZ2WUFBQUFIUXpOb0xYSjVZUUFBQUdCQUxmb0JXUWJpS3pOR2c2VXNzbGxKS3gzRGtXUUl6SFgKb2dtWjV0OFkzNEJLQmw0NDl5Wm9EcnNBQUFBa00rbmdyRHJBS3phREg0M3FYRllhRzNpQTA4ekNGVWNjNkNWZ05nVGZnMwptZHd2TS9EUEhMREoyY0E4bTVqTXMxT00xcjFLWmc0OUJMU3VGWGcrUEVtQ05yTkFIeW1KTHI1OWpMMXhmQmkrY2lVQUNjCkdGa1ZoT3REd1RiWmQxb2hWWjZMWWNzZGVPaFdFek1MOVl3QkFBQUlIRTMrOGdYaWIzdkdvV2c2VW9RbFRFUmVJY2tWREQKalVhUmtPQnJUT0xFNFNkNEl5SlZoNWY5STdOc0I2QlJJUVRLRkFIRTNxc0FUVENVLWRTM1BmRy5qYmlweEFHNTkveUsKd3grNVRyMz9Iby09Ci0tLS0tRU5EIE9QRU5TU0ggUFJJVkFURSBLRVktLS0tLQo="
+  storageClassName: "nfs-csi"
