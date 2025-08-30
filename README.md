@@ -1,9 +1,12 @@
 # Shared Volume Controller
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Go Report Card](https://goreportcard.com/badge/github.com/sharedvolume/shared-volume-controller)](https://goreportcard.com/report/github.com/sharedvolume/shared-volume-controller)
 [![Docker Pulls](https://img.shields.io/docker/pulls/sharedvolume/shared-volume-controller)](https://hub.docker.com/r/sharedvolume/shared-volume-controller)
 [![Release](https://img.shields.io/github/release/sharedvolume/shared-volume-controller.svg)](https://github.com/sharedvolume/shared-volume-controller/releases)
+
+**Repository**: [https://github.com/sharedvolume/shared-volume-controller](https://github.com/sharedvolume/shared-volume-controller)  
+**Releases**: [https://github.com/sharedvolume/shared-volume-controller/releases](https://github.com/sharedvolume/shared-volume-controller/releases)
 
 A Kubernetes operator that manages shared volumes with NFS server integration, enabling seamless data sharing across pods and namespaces with automatic data synchronization from various sources.
 
@@ -377,10 +380,10 @@ git-shared-volume   Ready   git-shared-volume-nfs.default.svc.cluster.local
 
 ```bash
 # Controller logs
-kubectl logs -n shared-volume-controller-system deployment/shared-volume-controller-manager
+kubectl logs -n shared-volume-controller-system deployment/shared-volume-controller-controller-manager
 
 # Webhook logs  
-kubectl logs -n shared-volume-controller-system deployment/shared-volume-controller-webhook
+kubectl logs -n shared-volume-controller-system deployment/shared-volume-controller-controller-manager
 
 # NFS server logs
 kubectl logs -l app=nfs-server -A
@@ -436,3 +439,17 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 Built with [Kubebuilder](https://github.com/kubernetes-sigs/kubebuilder) and inspired by the Kubernetes community's best practices for operators and volume management.
+
+---
+
+<div align="center">
+
+**⭐ Star this repository if it helped you!**
+
+[![GitHub stars](https://img.shields.io/github/stars/sharedvolume/shared-volume-controller?style=social)](https://github.com/sharedvolume/shared-volume-controller/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/sharedvolume/shared-volume-controller?style=social)](https://github.com/sharedvolume/shared-volume-controller/network/members)
+[![GitHub watchers](https://img.shields.io/github/watchers/sharedvolume/shared-volume-controller?style=social)](https://github.com/sharedvolume/shared-volume-controller/watchers)
+
+[Website](https://sharedvolume.github.io) • [Docker Hub](https://hub.docker.com/r/sharedvolume/shared-volume-controller) • [Contributing](CONTRIBUTING.md)
+
+</div>

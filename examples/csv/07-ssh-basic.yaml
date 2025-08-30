@@ -11,7 +11,7 @@ spec:
     capacity: "2Gi"
   source:
     ssh:
-      host: "10.113.241.157"
+      host: "ssh.example.com"
       port: 22
       user: "user2"
       password: "password1"
@@ -30,7 +30,7 @@ spec:
     capacity: "2Gi"
   source:
     ssh:
-      host: "10.113.241.157"
+      host: "ssh.example.com"
       port: 22
       user: "user2"
       password: "password1"
